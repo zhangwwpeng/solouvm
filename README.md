@@ -1,148 +1,159 @@
 # solouvm
 
-## 1. 总述
+用 Python 生成 UVM 验证框架与 UVM Runner。**Python 是唯一配置语言，运行时零第三方依赖。**
 
-`solouvm` 是一个用于生成 UVM 验证框架和 UVM Runner 的 Python 库。
-
-设计原则：
-
-- **Python 是第一公民**：仅支持 Python 配置，不支持 YAML、JSON 等其他配置格式。
-- **零第三方依赖**：仅使用 Python 标准库，无需安装第三方 Python 包。
-- **声明式文件收集与 Case 生成**：用户编写的 Python 文件返回 `list`，用于文件收集、测试 Case 生成等操作。
-- **只生成，不执行**：框架负责生成 Makefile 和相关文件，不负责实际的仿真执行。
-- **环境无关**：项目可以复制到任意目录使用，不要求安装为 Python 包。
-- **灵活扩展**：每个阶段提供 `pre-hook` 和 `post-hook`，允许用户根据自身需求扩展流程。
-
-暂定 Python 版本要求：`Python >= 3.10`。
-
-## 2. UVM Runner
-
-### 2.1 总述
-
-UVM Runner 通过统一入口 `main.py` 管理整个流程，并根据命令行参数分发到对应阶段。
-
-整个流程分为五个步骤：
-
-1. `main`：解析命令行参数并检查参数合法性。
-2. `com`：收集编译文件，生成 filelist 和编译用 Makefile。
-3. `run`：收集测试 Case，生成运行用 Makefile。
-4. `user run`：由用户自行提交和执行仿真任务。
-5. `end`：解析仿真日志，判断测试结果。
-
-每个由 Runner 管理的阶段均提供 `pre-hook` 和 `post-hook`，供用户自定义扩展逻辑。
-
-其中，**第 4 步由用户自行完成**。考虑到不同公司的计算集群、任务调度系统和仿真环境存在差异，solouvm 不规定统一的任务提交方式，也不负责实际的仿真执行。
-
-### 2.2 Main 阶段
-
-执行流程：
-
-1. 执行 `pre_hook_main.py`，运行用户自定义逻辑。
-2. 进入 `main.py`，解析命令行参数。
-3. 检查命令及参数是否合法；若不合法，向用户提供错误信息并终止流程。
-4. 执行 `post_hook_main.py`，运行用户自定义逻辑。
-
-### 2.3 Com 阶段
-
-执行流程：
-
-1. 执行 `pre_hook_com.py`，运行用户自定义逻辑。
-2. 加载一个或多个用户配置的 `filelist.py`，收集编译所需的文件。
-3. 根据收集结果生成 `filelist.f`。
-4. 执行 `post_hook_com.py`，运行用户自定义逻辑。
-5. 生成编译所需的 Makefile 及相关 filelist 文件。
-
-### 2.4 Run 阶段
-
-执行流程：
-
-1. 执行 `pre_hook_run.py`，运行用户自定义逻辑。
-2. 加载一个或多个用户配置的 `case.py`，收集待运行的测试 Case。
-3. 根据收集结果生成运行用 Makefile。
-4. 执行 `post_hook_run.py`，运行用户自定义逻辑。
-
-本阶段仅负责生成运行所需的 Makefile，不负责提交或执行仿真任务。
-
-### 2.5 User Run 阶段
-
-本阶段由用户自行完成，不属于 solouvm Runner 的自动执行流程。
-
-用户根据所在公司的计算集群、任务调度系统及仿真环境，自行选择合适的方式提交和执行仿真任务。
-
-例如，不同环境可能使用不同的集群任务提交命令，也可能直接在本地运行仿真。
-
-solouvm 不规定具体的任务提交方式，仅通过前一阶段生成的 Makefile，为用户提供统一的运行入口。
-
-### 2.6 End 阶段
-
-执行流程：
-
-1. 执行 `pre_hook_end.py`，运行用户自定义逻辑。
-2. 解析仿真日志，判断测试 Case 是否通过。
-3. 执行 `post_hook_end.py`，运行用户自定义逻辑。
-
-本阶段负责收集和分析仿真结果，不负责启动仿真任务。
-
-## 3. Hook 机制
-
-每个 Runner 阶段提供两个扩展入口：
-
-- `pre-hook`：在阶段核心逻辑执行之前运行。
-- `post-hook`：在阶段核心逻辑执行之后运行。
-
-Hook 用于满足不同项目和不同公司的定制化需求，同时尽量保持 Runner 核心逻辑的稳定。
-
-对应文件命名如下：
-
-```text
-pre_hook_main.py
-post_hook_main.py
-
-pre_hook_com.py
-post_hook_com.py
-
-pre_hook_run.py
-post_hook_run.py
-
-pre_hook_end.py
-post_hook_end.py
+```bash
+solouvm gen       # 收集文件与 case，生成 filelist.f / plan.json / Makefile
+solouvm build     # 编译
+solouvm regress   # 编译 + 跑全部 case + 汇总
+solouvm end       # 只汇总（幂等，可反复跑）
 ```
 
-Hook 的具体输入、返回值、异常处理和执行失败后的行为，由 solouvm 的接口规范统一定义。
+细节见 [doc/getting-started.md](doc/getting-started.md)，可运行示例见 [examples/demo](examples/demo)。
+
+## 1. 状态
+
+| 能力 | 状态 |
+|------|------|
+| 配置加载（`solouvm.conf.py` / `filelist.py` / `case.py`） | ✅ |
+| 文件收集、`filelist.f` 生成 | ✅ |
+| case × seed 计划（`plan.json`） | ✅ |
+| Makefile 生成（`build` / `run/<case_id>` / `regress`） | ✅ |
+| 单 case 执行器 `_exec`（超时、信号、日志重定向、`status.json`） | ✅ |
+| 日志判定 `logcheck`（UVM / 非 UVM） | ✅ |
+| 聚合 `end`、`results.json` / `results.txt`、退出码 | ✅ |
+| `pre/post` hook（main / com / run / end） | ✅ |
+| 生成 UVM 框架模板（gen 阶段） | ⬜ |
+| 波形（失败自动带波形重跑） | ⬜ |
+| 覆盖率（db 收集 / merge） | ⬜ |
+| 分片、`rerun-failed`、junit / html 报告 | ⬜ |
+
+决策与理由：[doc/design-decisions.md](doc/design-decisions.md)。
+
+## 2. 设计原则
+
+- **Python 是第一公民**：只支持 Python 配置，不解析 YAML / JSON / TOML。
+- **零第三方依赖**：运行时只用标准库；`pytest` 仅用于本仓库自测。
+- **声明式收集**：`filelist.py` 返回 `list`，`case.py` 返回 `list[Case]`，由 Runner 收集处理。
+- **生成优先，执行可选**：生成物本身可以独立工作（`make`），托管执行只是便利层。
+- **环境无关**：项目可整体复制到任意目录；契约文件只存相对路径，不要求安装为包。
+- **可扩展**：每个阶段提供 `pre-hook` / `post-hook`。
+
+要求 `Python >= 3.10`。
+
+## 3. Runner 流程
+
+```
+main ─ com ─ run ─ user run ─ end
+ │      │      │        │       └─ 聚合 status.json -> results.json + 退出码
+ │      │      │        └───────── 用户自行提交/执行（或被 regress 托管）
+ │      │      └────────────────── 收集 case，生成 Makefile 运行目标
+ │      └───────────────────────── 收集文件，生成 filelist.f 与编译目标
+ └──────────────────────────────── 解析参数、检查合法性
+```
+
+| README 阶段 | 对应命令 | 核心逻辑 |
+|-------------|----------|----------|
+| main | 所有命令 | `cli.py`：参数解析与校验 |
+| com | `gen` / `build` | `collect.py` + `makefile.py`：filelist 与编译目标 |
+| run | `gen` / `run` / `regress` | `plan.py` + `makefile.py`：plan 与运行目标 |
+| user run | `make regress`（或自己的调度系统） | `executor.py`(`_exec`)：起进程、超时、判定、写 `status.json` |
+| end | `end` | `status.py` + `report.py`：聚合、退出码 |
+
+### 3.1 判定归属：判定贴着进程，`end` 只收账
+
+一个 case 的结论取决于 `rc`、信号、是否超时，这些只有**启动进程的人**知道。因此判定发生在 `_exec` 里，写进 `status.json`；`end` **从不读原始日志**，只聚合 `status.json`。
+
+这带来两个直接后果：`end` 幂等、可重复执行；超时不再需要"等一个不会到来的日志文件"。
+
+规则顺序（固定，`pass_regex` 只能救"缺 UVM Report Summary"这一条启发式）：
+
+```
+signal(killed) → timeout → rc!=0 → fail_regex → UVM_ERROR/FATAL/WARNING 超上限
+→ UVM 日志缺 Summary → 非 UVM 缺 SOLOUVM_DONE → pass
+```
+
+### 3.2 执行边界：L1 只生成，L2 托管执行
+
+| 层 | 谁起进程 | 怎么用 |
+|----|----------|--------|
+| L1 | 用户自己 | `solouvm gen` 之后 `make build` / `make regress`，再由 `solouvm end` 收账 |
+| L2 | solouvm 调 `make` | `solouvm regress`（内部仍是 make + `_exec`） |
+
+两条路产出**同样的** `status.json`。solouvm 不规定任务提交方式，也不做 license 排队或调度器适配。
 
 ## 4. 用户配置接口
 
-用户通过 Python 文件提供配置和扩展逻辑。
+| 文件 | 内容 | 形式 |
+|------|------|------|
+| `solouvm.conf.py` | `CFG = {...}` | 项目级配置（simulator、jobs、timeout、checks、hook 之外的一切） |
+| `filelist.py` | `FILES = [...]` | 编译文件（`+incdir+` / `+define+` 来自 `CFG`；支持 glob） |
+| `case.py` | `CASES = [...]` | `list[solouvm.Case]` |
 
-例如：
+```python
+# case.py
+from solouvm import Case
 
-- `filelist.py`：返回编译文件列表。
-- `case.py`：返回测试 Case 列表。
-- `pre_hook_*.py`：阶段执行前的自定义逻辑。
-- `post_hook_*.py`：阶段执行后的自定义逻辑。
+CASES = [
+    Case(name="smoke", uvm_test="smoke_test"),
+    Case(name="num", uvm_test="num_test", params={"NUM": 32}, tags=("nightly",)),
+    Case(name="known_bug", uvm_test="num_test", expect_fail=True),
+]
+```
 
-配置文件通过返回 `list` 提供数据，由 Runner 负责收集和处理。
+> 注意：配置文件名是 `solouvm.conf.py`，**不能叫 `solouvm.py`**——同名文件会遮蔽库本身，`python -m solouvm` 会静默导入配置字典。原因见 [design-decisions.md](doc/design-decisions.md) D9。
 
-框架不要求用户编写额外的 YAML、JSON 等配置文件。
+## 5. Hook
 
-## 5. 设计边界
+```python
+# pre_hook_run.py
+def hook(ctx):        # ctx: stage/when/command/root/workdir/project/verbose[+plan]
+    ...
+```
 
-solouvm 负责：
+- 阶段：`main` / `com` / `run` / `end`，各有 `pre` 与 `post`；
+- 返回值被忽略；**异常中止命令并返回退出码 2**（hook 属于构建的一部分，不能静默降级）；
+- `--no-hooks` 可在 CI 中隔离用户逻辑。
 
-- UVM 验证框架生成。
-- Python 配置加载与处理。
-- 编译文件收集。
-- 测试 Case 收集。
-- filelist 生成。
-- Makefile 生成。
-- 仿真日志解析与测试结果判断。
-- 通过 Hook 提供扩展能力。
+## 6. 契约文件
 
-solouvm 不负责：
+```
+filelist.f  Makefile
+.solouvm/plan.json                      # 本次 case × seed（唯一事实来源，schema 1）
+.solouvm/out/<case_id>/sim.log          # stdout+stderr，由 _exec 重定向
+.solouvm/out/<case_id>/status.json      # 单 case 判定（schema 1）
+.solouvm/results.json  results.txt      # 聚合结果
+```
 
-- 实际的仿真执行。
-- 特定公司的集群任务提交。
-- 特定调度系统的管理。
-- 强制规定用户的项目目录结构及工作流。
+`_exec` 只读 `plan.json`，不加载配置、不 import case 代码：配置漂移不影响已生成的结果。
 
-**核心目标：以 Python 为唯一配置语言，提供轻量、可移植、可扩展的 UVM 框架生成与 Runner 工具，同时将具体仿真环境和任务调度的控制权交给用户。**
+## 7. 退出码
+
+| 码 | 含义 |
+|----|------|
+| 0 | 全部通过（`xfail` 记通过） |
+| 1 | 至少一个 `fail` / `timeout` / `error` / `killed` / `xpass` |
+| 2 | 配置或环境错误 |
+| 130 | Ctrl-C |
+
+## 8. 文档与示例
+
+| 文档 | 内容 |
+|------|------|
+| [doc/getting-started.md](doc/getting-started.md) | 快速开始、命令表、生成物、判定规则、hook |
+| [doc/design-decisions.md](doc/design-decisions.md) | 每条设计决策的现状 / 理由 / 代价，以及未决策项 |
+| [examples/demo](examples/demo) | 可直接跑通的最小工程（内置假仿真器） |
+
+## 9. 开发
+
+```bash
+uv sync
+uv run pytest                                     # 118 项，含假仿真器驱动的全流程测试
+uv run pytest --cov=solouvm                       # 目前 91%
+uv run ruff check .
+uv run solouvm -c examples/demo/solouvm.conf.py regress
+```
+
+## 10. 许可证
+
+MIT，见 [LICENSE](LICENSE)。

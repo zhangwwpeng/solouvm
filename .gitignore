@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# generated artifacts of this repo's own demo
+examples/demo/.solouvm/
+examples/demo/filelist.f
+examples/demo/Makefile
+
+# local runs
+/.solouvm/
+/filelist.f
+/results.json
+/results.txt
+.coverage
+htmlcov/
