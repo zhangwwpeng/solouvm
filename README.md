@@ -142,6 +142,7 @@ filelist.f  Makefile
 |------|------|
 | [doc/getting-started.md](doc/getting-started.md) | 快速开始、命令表、生成物、判定规则、hook |
 | [doc/design-decisions.md](doc/design-decisions.md) | 每条设计决策的现状 / 理由 / 代价，以及未决策项 |
+| [doc/python-craft.md](doc/python-craft.md) | 这份代码的 Python 写法思路：契约优先、数据建模、边界处理、测试策略，附 5 个练习 |
 | [examples/demo](examples/demo) | 可直接跑通的最小工程（内置假仿真器） |
 
 ## 9. 开发
