@@ -10,11 +10,11 @@
 
 **现状**
 
-| 文件 | 内容 | 的形式 |
-|------|------|--------|
-| `solouvm.conf.py` | `CFG = {...}` 项目级配置 | 模块级字典 |
-| `filelist.py` | `FILES = [...]` 编译文件 | 模块级 list |
-| `case.py` | `CASES = [...]` 测试 case | `list[solouvm.Case]` |
+| 文件              | 内容                      | 的形式               |
+|-------------------|---------------------------|----------------------|
+| `solouvm.conf.py` | `CFG = {...}` 项目级配置  | 模块级字典           |
+| `filelist.py`     | `FILES = [...]` 编译文件  | 模块级 list          |
+| `case.py`         | `CASES = [...]` 测试 case | `list[solouvm.Case]` |
 
 三者都支持"模块级变量"或"同名函数"两种写法（`FILES` / `files()`）。
 

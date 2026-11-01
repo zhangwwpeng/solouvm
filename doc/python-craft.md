@@ -30,12 +30,12 @@ errors.py  →  model.py  →  util.py  →  config.py  →  collect.py
 
 我在写第一行实现代码之前，先把这四样钉在纸上（现在它们都在 README / design-decisions 里）：
 
-| 契约 | 内容 | 落在哪 |
-|------|------|--------|
-| 文件 | `plan.json`、`status.json`、`results.json`，都带 `"schema": 1` | `status.py`、`plan.py` |
-| 退出码 | `0/1/2/130`，含义唯一 | `errors.py` |
-| 单位 | 一个 `case_id = <case>__<seed>`，一个 `outdir` | `model.py` |
-| 边界 | 判定在 `_exec`，`end` 只读 `status.json` | `executor.py` / `status.py` |
+| 契约   | 内容                                                           | 落在哪                      |
+|--------|----------------------------------------------------------------|-----------------------------|
+| 文件   | `plan.json`、`status.json`、`results.json`，都带 `"schema": 1` | `status.py`、`plan.py`      |
+| 退出码 | `0/1/2/130`，含义唯一                                          | `errors.py`                 |
+| 单位   | 一个 `case_id = <case>__<seed>`，一个 `outdir`                 | `model.py`                  |
+| 边界   | 判定在 `_exec`，`end` 只读 `status.json`                       | `executor.py` / `status.py` |
 
 好处很具体：因为 `status.json` 的形状先定了，`end`、`report`、测试三者可以**并行**开发，互不返工。
 
