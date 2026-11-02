@@ -1,0 +1,192 @@
+# UVM 环境风格规范
+
+所有由 solouvm 生成、或在 solouvm 项目中编写的 UVM 验证环境，都遵守同一套结构与写法。本文是这套规范的唯一出处：solouvm 的生成模板按它实现，`lint-style` 按它检查，它也作为系统文档的一部分交给 AI。
+
+> 状态：初稿，尚无代码。条目可以按团队习惯调整，但调整后所有环境一起遵守，不允许某个环境例外。规范带版本号，当前为 `style 1`。
+
+## 1. 为什么要统一
+
+- AI 每次从零写环境，风格一定会漂移；人接手不同环境时，也需要一眼就知道东西在哪。
+- 分诊与判定依赖固定的约定：消息 ID、scoreboard 的汇总打印、sequence 的开始与结束打印，都是 `expect` 与子 agent 判断"是否真的验证了"的依据。
+- 统一的结构让模板升级可以批量作用到所有环境（受保护的用户代码区，见 §9）。
+
+## 2. 目录结构
+
+```text
+verif/
+  agents/<agent>/
+    <agent>_if.sv            interface
+    <agent>_pkg.sv           package：include 下列全部文件
+    <agent>_txn.sv           transaction
+    <agent>_cfg.sv           agent 配置对象
+    <agent>_drv.sv           driver
+    <agent>_mon.sv           monitor
+    <agent>_sqr.sv           sequencer（通常只是 typedef）
+    <agent>_cov.sv           coverage subscriber
+    <agent>_agent.sv         agent
+    seq/<agent>_base_seq.sv  基础 sequence
+    seq/<agent>_*_seq.sv     其他 sequence
+  envs/<env>/
+    <env>_env_pkg.sv         package
+    <env>_env_cfg.sv         env 配置对象
+    <env>_scb.sv             scoreboard
+    <env>_ref.sv             参考模型（可选）
+    <env>_vsqr.sv            virtual sequencer
+    <env>_cov.sv             env 级 coverage（可选）
+    <env>_env.sv             env
+    vseq/<env>_base_vseq.sv  基础 virtual sequence
+    vseq/<env>_*_vseq.sv     其他 virtual sequence
+  tests/<env>/
+    <env>_test_pkg.sv        package
+    <env>_base_test.sv       基础 test
+    <env>_*_test.sv          具体 test
+  tb/
+    tb_top.sv                顶层：时钟、复位、DUT、interface 例化、config_db 设置
+    binds.sv                 bind 与任何 DUT 层次引用
+```
+
+与文件分组（config.md §4.1）的对应：
+
+| 目录 | 分组 |
+|------|------|
+| `verif/agents/`、`verif/envs/`、`verif/tests/` | `tb` |
+| `verif/tb/` | `top` |
+
+`solouvm init` 生成的 `filelist.py` 按依赖顺序用 glob 收集，因此新增 agent、env、test 后**不需要修改 `filelist.py`**：
+
+```python
+FILES = {
+    "rtl": ["rtl/**/*.sv"],
+    "tb": [
+        "+incdir+verif",
+        "verif/agents/*/*_if.sv",
+        "verif/agents/*/*_pkg.sv",
+        "verif/envs/*/*_env_pkg.sv",
+        "verif/tests/*/*_test_pkg.sv",
+    ],
+    "top": ["verif/tb/tb_top.sv", "verif/tb/binds.sv"],
+}
+```
+
+约束：agent 之间互不依赖；env 只依赖 agent；test 只依赖 env。如果需要 env 嵌套 env，子 env 放在 `verif/envs/` 下，并以 `sub_` 开头命名，filelist 中排在父 env 之前（待细化）。
+
+## 3. 命名
+
+| 对象 | 规则 | 示例 |
+|------|------|------|
+| 文件 | 一个文件一个类；文件名 = 类名 + `.sv` | `axi_mst_drv.sv` |
+| 类、package、interface | 全小写下划线 | `axi_mst_drv` |
+| 类名后缀 | `_txn` `_cfg` `_drv` `_mon` `_sqr` `_cov` `_agent` `_scb` `_ref` `_vsqr` `_env` `_seq` `_vseq` `_test` | |
+| package | `<agent>_pkg`、`<env>_env_pkg`、`<env>_test_pkg` | `axi_mst_pkg` |
+| interface | `<agent>_if` | `axi_mst_if` |
+| 成员变量 | 小写下划线；句柄不加类型前缀 | `cfg`、`vif`、`item` |
+| 宏 | 全大写，以项目前缀开头 | `AXI_VIP_MAX_LEN` |
+| 参数、常量 | 全大写 | `ADDR_W` |
+
+## 4. 类的写法
+
+- 所有组件与对象都注册到 factory，统一用 `type_id::create` 创建。
+- 每个类的成员顺序：工厂注册宏 → 成员变量 → `new` → phase 方法（按执行顺序）→ 其他方法。
+- 配置只通过配置对象传递：`<agent>_cfg` 包含 `is_active`、`vif` 等；env 的 `<env>_env_cfg` 持有各 agent 的 cfg。
+- `uvm_config_db` 的键固定：
+  - 配置对象：`"cfg"`；
+  - virtual interface：`"vif"`，只在 `tb_top` 中设置，只在 agent 的 `build_phase` 中读取。
+- driver 中的时序只通过 interface 的 clocking block 产生，不写裸 `#delay`。
+- 不使用 `$display` / `$finish`，一律用 UVM 报告宏与 objection。
+
+## 5. 消息与日志约定
+
+这一节直接服务于判定与分诊，必须严格遵守。
+
+### 5.1 消息 ID
+
+ID = 组件类名去掉项目无关部分后的大写形式：
+
+| 组件 | ID 示例 |
+|------|---------|
+| `axi_mst_drv` | `AXI_MST_DRV` |
+| `axi_mst_mon` | `AXI_MST_MON` |
+| `axi_scb` | `AXI_SCB` |
+| `axi_burst_test` | `AXI_BURST_TEST` |
+
+同一组件内需要细分时，用 `.` 追加：`AXI_SCB.CMP`、`AXI_SCB.TIMEOUT`。waiver 按 ID 豁免时以此为准。
+
+### 5.2 必须有的打印
+
+| 位置 | 级别 | 格式 | 用途 |
+|------|------|------|------|
+| scoreboard 的 `report_phase` | `UVM_LOW` | `compared=<N> matched=<M> mismatched=<K> pending=<P>` | `expect` 检查"确实比对过"；判断提前结束 |
+| 每个 sequence 的 `body` 开始与结束 | `UVM_MEDIUM` | `start` / `done items=<N>` | 判断激励是否发出 |
+| test 的 `start_of_simulation_phase` | `UVM_LOW` | 打印 test 名、种子、关键配置 | 分诊时确认配置 |
+| scoreboard 比对失败 | `uvm_error` | `mismatch: expect <期望> got <实际> (<关键字段>)` | 首条错误与签名 |
+| 结束时仍有未比对的数据 | `uvm_error` | `pending=<P> items not compared` | 拦截"只发不比"的虚假 pass |
+
+模板中的 scoreboard 已包含前两行与最后一行；`solouvm new test` 生成的 test 默认带一条对应的 `expect`：
+
+```python
+expect=[Expect(regex=r"compared=(\d+)", min=1)]
+```
+
+### 5.3 级别使用
+
+| 级别 | 用于 |
+|------|------|
+| `uvm_fatal` | 环境无法继续：拿不到 vif、配置缺失 |
+| `uvm_error` | 设计行为与预期不符 |
+| `uvm_warning` | 可疑但不一定错，必须在 waiver 中说明或尽快消除 |
+| `uvm_info` | 其余；默认运行级别为 `UVM_LOW` |
+
+## 6. objection 与结束
+
+- 只在 test（或其启动的顶层 virtual sequence）中 raise / drop objection；driver、monitor、scoreboard 不碰 objection。
+- test 的 `run_phase` 中设置 drain time，默认 1 us，可在 test 中覆盖。
+- scoreboard 在 `check_phase` 中检查未比对的数据（§5.2 最后一行）。
+
+## 7. sequence
+
+- 每个 agent 有一个 `<agent>_base_seq`，其他 sequence 继承它。
+- 跨 agent 的激励写成 virtual sequence，放在 env 的 `vseq/` 下，通过 `<env>_vsqr` 启动。
+- test 只负责选择与配置 virtual sequence，不直接写激励逻辑。
+
+## 8. coverage
+
+- agent 级 coverage 放在 `<agent>_cov`（`uvm_subscriber`），连接 monitor 的 analysis port。
+- 功能点与 case 的 `intent` 对应；covergroup 名称以功能点命名，便于以后做 testplan 映射。
+
+## 9. 生成文件与用户代码区
+
+生成的文件头部带有生成信息：
+
+```systemverilog
+// generated by solouvm (style 1, template axi_agent@1) -- edit only inside user regions
+```
+
+用户代码只能写在受保护区内，重新生成（`solouvm uvm sync`）时原样保留：
+
+```systemverilog
+task run_phase(uvm_phase phase);
+  // solouvm:user begin run_phase
+  forever begin
+    seq_item_port.get_next_item(req);
+    drive(req);
+    seq_item_port.item_done();
+  end
+  // solouvm:user end run_phase
+endtask
+```
+
+规则：
+
+- 区域名在一个文件内唯一；
+- 模板升级后某个区域被移除时，其中的内容不会被丢弃：写入同目录下的 `<文件>.orphan`，并在 `uvm sync` 的输出中提示；
+- 区域外的手工修改会在 `uvm sync` 与 `lint-style` 中报告，不会被静默覆盖。
+
+## 10. 禁止事项
+
+| 禁止 | 理由 |
+|------|------|
+| 在 `tb` 组的文件中引用 DUT 层次路径 | fake_top 无法编译；统一放 `top` 组（Q5） |
+| 在 `tb_top` 之外设置 vif | 配置来源必须唯一 |
+| 在组件中直接 `new` 而不用 factory | 无法 override |
+| `$display`、`$finish`、裸 `#delay` | 绕过 UVM 报告与 phase 机制，判定无从统计 |
+| 没有 ID 或 ID 不符合 §5.1 的 UVM 消息 | waiver 与签名依赖 ID |

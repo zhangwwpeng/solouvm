@@ -1,6 +1,6 @@
 # 命令行参考
 
-本文列出 solouvm 全部命令、参数与退出码。命令行输出、错误信息一律为英文（N-15）；本文的说明用中文。
+本文列出 solouvm 全部命令、参数与退出码。人和 AI 使用同一套命令（N-16）：默认输出给人看，`--json` 给程序与 AI。命令行输出、错误信息一律为英文（N-15）；本文的说明用中文。
 
 > 状态：设计稿，尚无代码。
 
@@ -30,6 +30,8 @@ solouvm [全局参数] <命令> [命令参数]
 | `-q, --quiet` | 只输出错误与最终摘要 |
 | `--no-hooks` | 跳过全部 A 端 hook（W-03） |
 | `--provider NAME` | 临时指定 provider（H-01a） |
+| `--json` | 以 JSON 输出，结构见 §1.5（N-17） |
+| `--role main\|triage` | 运行角色，默认 `main`；`triage` 下只允许只读命令与记录写入（AI-10） |
 | `--version` | 打印版本 |
 
 ### 1.3 选择参数
@@ -49,13 +51,47 @@ solouvm [全局参数] <命令> [命令参数]
 
 选择顺序：先按 `stage` 过滤，再按 `--case`、`--tag`、`--exclude-tag`、`--build`，然后展开种子成 job，最后分片。
 
-### 1.4 执行参数
+### 1.4 机器可读输出
+
+`--json` 时，标准输出只有一个 JSON 对象（流式命令为 JSON Lines，每行一个事件）：
+
+```json
+{"schema": 1, "command": "list", "ok": true, "data": {...}, "truncated": null, "next": ["solouvm gen --tag nightly"]}
+```
+
+出错时：
+
+```json
+{"schema": 1, "command": "gen", "ok": false,
+ "error": {"code": "CFG_UNKNOWN_KEY", "message": "unknown key 'regres' in CFG",
+           "file": "solouvm.conf.py", "line": 12, "hint": "did you mean 'regress'?"}}
+```
+
+- `error.code` 是稳定的错误码，完整列表见 [formats.md](formats.md) §9（N-18）；
+- `truncated`：输出被截断时给出省略数量与继续查看的命令（N-19），例如 `{"omitted": 1840, "more": "solouvm log burst__4417 --lines 200-400"}`；
+- `next`：建议的下一步命令，人类输出模式下以 `next:` 行打印。
+
+默认的人类输出同样遵守输出上限：列表超过 50 行、日志超过 200 行时截断并提示。`--limit N` 可调整，`--limit 0` 表示不截断。
+
+### 1.5 角色与权限
+
+`--role triage` 下允许的命令（AI-10）：
+
+| 类别 | 命令 |
+|------|------|
+| 只读 | `uvm diff`、`lint-style`、`list`、`files`、`config`、`validate`、`status`、`log`、`explain`、`wave`、`notes`、`history`、`progress`、`schema`、`help`、`triage packet`、`triage status` |
+| 记录写入 | `bug add`、`bug update`（只能改自己登记的 bug）、`note add`、`todo add`、`triage write` |
+
+其余命令（`gen`、`build`、`regress`、`rerun`、`stop`、`clean`、`triage plan`、`triage review`、`todo done` 等）一律拒绝，错误码 `ROLE_DENIED`，退出码 2。
+
+### 1.6 执行参数
 
 用于 `build`、`run`、`regress`、`rerun`：
 
 | 参数 | 说明 |
 |------|------|
 | `-j, --jobs N` | 并行数 |
+| `--force` | 允许 job 数超过 `limits.max_jobs`（防止误起大量仿真） |
 | `--detach` | 启动后立即返回（Z-06） |
 | `--wave` | 所有 job 打开波形 |
 | `--retry N` | 覆盖 `regress.retry` |
@@ -66,11 +102,13 @@ solouvm [全局参数] <命令> [命令参数]
 
 ### `solouvm init`
 
-在当前目录生成最小可跑的项目：`solouvm.conf.py`、`filelist.py`、`case.py`、`.gitignore` 条目，以及使用 `fake` 后端的示例 case（Z-01）。已有同名文件时不覆盖，报错退出。
+在当前目录生成起步项目（Z-01、U-03）：`solouvm.conf.py`、`filelist.py`、`tbspec.py`、`case.py`、系统文档骨架、`.gitignore` 条目，以及按 uvm-style.md 生成的示例 env、agent、test。默认使用 `fake` 后端，生成后直接 `solouvm regress` 即可跑通。已有同名文件时不覆盖，报错退出。
 
 | 参数 | 说明 |
 |------|------|
 | `--simulator NAME` | 示例配置使用的后端，默认 `fake` |
+| `--agents FRAMEWORK` | 同时生成子 agent 定义模板，如 `claude`（AI-12） |
+| `--bare` | 只生成配置文件，不生成示例环境 |
 
 ### `solouvm config`
 
@@ -84,6 +122,24 @@ solouvm [全局参数] <命令> [命令参数]
 ### `solouvm files`
 
 列出最终文件清单：分组、顺序、每个文件来自哪个条目或哪个 `.f`；项目根之外的路径单独标出（F-10）。
+
+### `solouvm validate`
+
+只加载与校验配置、文件清单、case、记录，不生成任何文件（Z-10）。问题按 `文件:行` 报告：
+
+```text
+case.py:42: error: Case 'burst' is stage 'ready' but has no 'expect' (AI-02)
+cases/axi_wrap.py:18: error: Bug id 3 duplicated in case 'axi_wrap'
+solouvm.conf.py:12: error: unknown key 'regres' in CFG; did you mean 'regress'?
+
+3 errors
+```
+
+有错误时退出码 2。改完 case 后先跑它，是主 agent 的标准动作。
+
+### `solouvm schema [NAME]`
+
+打印 JSON Schema：`config`、`case`、`records`、`plan`、`results`、`facts`、`packet`、`output`（Z-11）。不带参数时列出可用名称。
 
 ### `solouvm list`
 
@@ -112,7 +168,42 @@ smoke__1        smoke   1     default                ready
 
 任一项失败时退出码为 2。
 
-## 3. 生成与执行
+## 3. UVM 环境
+
+### `solouvm new KIND NAME`
+
+按模板生成组件（U-01），位置见 uvm-style.md §2。`KIND`：
+
+| KIND | 生成 | 必需参数 |
+|------|------|----------|
+| `agent` | interface、package、txn、cfg、drv、mon、sqr、cov、agent、base_seq | 若 `tbspec.py` 中已有同名 agent，按其描述生成；否则生成带占位信号的骨架 |
+| `env` | package、env_cfg、scb、vsqr、env、base_vseq，以及 test package 与 base_test | `--agents a,b` 或使用 `tbspec.py` 中的描述 |
+| `test` | `<env>_<name>_test.sv`，并在 `case.py`（或 `cases/`）中登记一个 `stage="wip"` 的 case，带默认 `expect`（U-09） | `--env E` |
+| `seq` | `<agent>_<name>_seq.sv` | `--agent A` |
+| `vseq` | `<env>_<name>_vseq.sv` | `--env E` |
+
+已存在的文件不覆盖，报错退出；需要按新模板更新已有文件时用 `uvm sync`。
+
+### `solouvm uvm sync`（M2）
+
+按 `tbspec.py` 与当前模板重新生成全部组件，保留用户代码区（U-04、U-05）。
+
+| 参数 | 说明 |
+|------|------|
+| `--env E` / `--agent A` | 只处理指定组件 |
+| `--dry-run` | 等同 `uvm diff` |
+
+输出：更新的文件、新生成的文件、`.orphan` 文件、区域外被手工修改的文件、`tbspec.py` 中已不存在的多余文件。
+
+### `solouvm uvm diff`（M3）
+
+预览 `uvm sync` 的改动，以统一 diff 格式输出（U-10）。
+
+### `solouvm lint-style`（M3）
+
+按 uvm-style.md 检查目录、命名、消息 ID 与禁止事项（U-08），问题按 `文件:行` 报告。
+
+## 4. 生成与执行
 
 ### `solouvm gen`
 
@@ -172,7 +263,7 @@ fast compile：slang 检查 → fake_top 编译（→ RTL 增量编译，P2）�
 
 发现代码错误时退出码 1；slang 或仿真器无法运行时退出码 2。
 
-## 4. 运行中与运行后
+## 5. 运行中与运行后
 
 ### `solouvm status`
 
@@ -192,8 +283,46 @@ fast compile：slang 检查 → fake_top 编译（→ RTL 增量编译，P2）�
 | `--run RUN_ID` | 默认 `latest` |
 | `--try N` | 第几次尝试，默认最后一次 |
 | `--tail N` | 只看最后 N 行 |
+| `--lines A-B` | 只看第 A 到 B 行（AI-14） |
+| `--around N [--context C]` | 第 N 行前后各 C 行，默认 C=30 |
+| `--grep REGEX` | 只看匹配的行，带行号 |
 | `-f, --follow` | 跟随输出，job 结束后自动退出 |
 | `--build MODE` | 看编译日志而不是 job 日志 |
+
+### `solouvm explain JOB_ID`
+
+一次给出排查一个结果所需的信息（AI-04）：
+
+1. 状态、判定原因、类别；
+2. 首条错误及前后 30 行日志；
+3. 首条错误与 UVM 消息中 `file(line)` 指向的源码片段（AI-15）；
+4. `expect` 逐条检查结果与 J-19 弱信号；
+5. 失败签名，以及历史上同签名的失败；
+6. 关联的 bug 与上次分诊结论；
+7. 这个 case 上次通过的轮次，以及之后的 git 提交；
+8. 复现命令。
+
+| 参数 | 说明 |
+|------|------|
+| `--run RUN_ID` | 默认 `latest`，输出中写明实际 run_id |
+| `--try N` | 默认最后一次尝试 |
+
+### `solouvm wave JOB_ID`
+
+以文本表格返回波形中指定信号在一段时间内的值（AI-13）。只读查询，不打开 GUI。
+
+```text
+solouvm wave burst__4417 --signals tb_top.dut.araddr,tb_top.dut.arvalid --from 1200ns --to 1500ns
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--signals LIST` | 逗号分隔的层次路径，支持 `*` 通配 |
+| `--from T` / `--to T` | 时间窗口 |
+| `--changes` | 只输出值变化的时刻（默认） |
+| `--limit N` | 最多输出多少行，默认 200 |
+
+在 B 上调用后端定义的导出工具（如 Verdi 的 `fsdbreport`），具体命令待调研；没有波形时提示用 `rerun --wave` 生成。
 
 ### `solouvm stop`
 
@@ -230,7 +359,7 @@ fast compile：slang 检查 → fake_top 编译（→ RTL 增量编译，P2）�
 | `solouvm history` | 最近 N 轮：时间、git commit、通过率、耗时（Y-04） |
 | `solouvm history CASE` | 某个 case 在各轮的结果（Y-05） |
 
-## 5. case 记录
+## 6. case 记录
 
 ### `solouvm notes`
 
@@ -256,6 +385,104 @@ burst       todo  -       wp       -     补 narrow transfer 场景（due 2026-1
 
 另外接受选择参数中的 `--case`、`--tag`。
 
+### `solouvm bug add CASE`
+
+登记 bug，写回 case 源文件（M-14）。
+
+```text
+solouvm bug add burst --title "WRAP 跨 4K 边界地址回绕错误" --seed 4417 \
+    --owner hw-zhao --body-file /tmp/burst-bug.md
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--title` | 必填 |
+| `--seed` / `--run` / `--job` | 复现信息；`--job` 时自动取其种子 |
+| `--owner` / `--link` / `--body` / `--body-file` | |
+| `--id N` | 不写时取下一个可用编号 |
+
+输出新 bug 的完整 ID，例如 `burst#3`。`found` 取当天日期，`status` 为 `open`，`author` 按角色自动填写。
+
+### `solouvm bug update CASE#ID`
+
+| 参数 | 说明 |
+|------|------|
+| `--status S` | 按 config.md §5.2 的状态约束，自动补 `fixed` / `verified` 日期 |
+| `--owner` / `--link` / `--append-body TEXT` | |
+
+triage 角色只能修改自己登记、且尚未被审查的 bug。
+
+### `solouvm note add CASE` / `solouvm todo add CASE` / `solouvm todo done CASE#ID`
+
+`note add` 追加调试记录（`Log`，默认）或一般备注（`--kind note`）；`todo add` 追加 todo；`todo done` 标记完成（仅限 main 角色）。命名上与查看日志的 `solouvm log JOB_ID` 区分开。
+
+写入流程统一：定位 `notes=[...]` → 插入 → 重新加载并校验 → 失败则恢复原文件并报错。被写入的文件有未保存的冲突（例如同时被编辑器修改）时拒绝写入。
+
+### `solouvm triage plan`
+
+按 `CFG["triage"]` 为某一轮生成分诊任务（AI-05）。只能由 main 角色执行。
+
+```text
+TASK                         KIND   JOBS  CASE        SIGNATURE / REASON
+20261103-101500-a1b2/1       fail   3     burst       3fa9c2e1 UVM_ERROR ... [SCB] addr <HEX> ...
+20261103-101500-a1b2/2       pass   1     axi_wrap    stage=wip
+20261103-101500-a1b2/3       pass   1     smoke       weak signal: sim time 0ns
+
+3 tasks
+next: solouvm triage packet 20261103-101500-a1b2/1
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--run RUN_ID` | 默认 `latest` |
+| `--pass-policy none\|changed\|all` | 覆盖配置 |
+
+重复执行时不重复创建已存在的任务。
+
+### `solouvm triage packet TASK`
+
+输出任务的上下文包（markdown），子 agent 的起点（AI-06）。内容见 [ai-workflow.md](ai-workflow.md) §5.2。
+
+| 参数 | 说明 |
+|------|------|
+| `--limit N` | 覆盖 `triage.packet_limit` |
+
+### `solouvm triage write TASK`
+
+写入分诊结论（AI-07、AI-16）。
+
+```text
+solouvm --role triage triage write 20261103-101500-a1b2/1 \
+    --verdict design_bug --confidence high \
+    --summary "WRAP 地址计算未对 4K 边界取模，addr_q 第二拍回绕成 0" \
+    --evidence "log:812" --evidence "rtl/axi_slv.sv:120" --evidence "wave:1234ns tb_top.dut.addr_q" \
+    --bug burst#3 --doc /tmp/triage-1.md
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--verdict` | `real_pass` / `false_pass` / `design_bug` / `tb_bug` / `spec_unclear` / `env_issue` / `unknown` |
+| `--confidence` | `high` / `medium` / `low` |
+| `--summary` | 不超过 200 字 |
+| `--evidence` | 至少一条；格式 `log:行号`、`文件:行号`、`wave:时间 信号` |
+| `--bug` | 关联的 bug，可重复 |
+| `--doc FILE` | 调试文档；校验必需章节后复制到 `docs/debug/<case>/<run_id>-<序号>.md` |
+
+约束：结论必须与任务类型相容——pass 任务只能是 `real_pass` / `false_pass`；失败任务不能是 `real_pass`（AI-08）。同一任务重复写入时，覆盖未审查的上一次结论。
+
+### `solouvm triage review TASK`
+
+主 agent 审查（AI-09）。
+
+| 参数 | 说明 |
+|------|------|
+| `--accept` | 接受结论，按 ai-workflow.md §7 更新最终状态 |
+| `--reject REASON` | 驳回，理由必填；子 agent 登记的 bug 自动改为 `wontfix` |
+
+### `solouvm triage status`
+
+列出某轮全部分诊任务、结论、置信度、审查状态，未审查的排在前面（AI-11）。存在未审查任务时退出码 1，便于脚本判断"本轮是否已全部审完"。
+
 ### `solouvm doc`
 
 导出 markdown（M-08 ~ M-10、M-21）。
@@ -272,7 +499,7 @@ burst       todo  -       wp       -     补 narrow transfer 场景（due 2026-1
 
 终端版进度总览（M-20）：各 stage 的 case 数、最近一轮通过率、按 owner 统计的未解决 bug 与 todo、逾期 todo、状态不一致提示（M-22）。
 
-## 6. 其他
+## 7. 其他
 
 ### `solouvm cov`
 
@@ -281,16 +508,26 @@ burst       todo  -       wp       -     补 narrow transfer 场景（due 2026-1
 | `solouvm cov merge [--run RUN_ID]` | 在 B 上合并该轮通过 job 的覆盖率库（V-03） |
 | `solouvm cov report [--run RUN_ID]` | 在 B 上生成报告，A 只取回汇总数字（V-04） |
 
+### `solouvm bisect CASE`（P2）
+
+在两个 git 提交之间二分，找出引入失败的提交（AI-17）。
+
+| 参数 | 说明 |
+|------|------|
+| `--seed N` | 用于判断的种子 |
+| `--good REV` / `--bad REV` | 默认为该 case 上次通过的提交与当前提交 |
+
 ### `solouvm clean`
 
 | 参数 | 说明 |
 |------|------|
 | 无参数 | 删除 A 与 B 上的 `.solouvm/runs/` 中超出保留策略的轮次 |
+| `--run RUN_ID` | 只删除指定轮次；破坏性操作不接受 `latest` |
 | `--all` | 删除整个 `.solouvm/`（A 与 B），保留用户文件 |
 | `--locks` | 清除残留的编译锁（见 architecture.md §12） |
 | `--local-only` | 只清理 A |
 
-## 7. 手动模式
+## 8. 手动模式
 
 不经 solouvm 执行时，生成物可以直接用 `make`（N-03）：
 

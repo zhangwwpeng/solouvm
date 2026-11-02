@@ -21,6 +21,9 @@
 | `env.json` | A | A | `runs/<run_id>/` |
 | `results.json` | A | A、CI、用户脚本 | `runs/<run_id>/` |
 | `fast_state.json` | A | A | `build/<mode>/` |
+| `triage/tasks.json` | A | A | `runs/<run_id>/` |
+| 调试文档 | 子 agent（经 `triage write`） | 人、AI | `docs/debug/<case>/`（入库） |
+| `--json` 输出 | A | 程序、AI | 标准输出 |
 
 ## 2. `job.facts`
 
@@ -177,6 +180,7 @@ schema 不支持            → 报错（error）
       "case": "burst",
       "seed": 4417,
       "status": "fail",
+      "judged_status": "fail",
       "raw_status": "fail",
       "category": "design",
       "reason": "UVM_ERROR=1 > 0",
@@ -184,7 +188,11 @@ schema 不支持            → 报错（error）
       "signature": {"id": "3fa9c2e1", "text": "UVM_ERROR uvm_test_top.env.scb [SCB] addr <HEX> …"},
       "uvm": {"info": 340, "warning": 2, "error": 1, "fatal": 0, "waived": {"error": 0, "warning": 2}},
       "waivers": [{"id": "AXI/OUTSTANDING", "lines": 2}],
+      "expect": [{"rule": "regex '[SCB] compared (\\d+)' min 100", "ok": true, "value": 412}],
+      "weak_signals": [],
       "known": ["burst#1"],
+      "triage": {"task": "20261103-101500-a1b2/1", "verdict": "design_bug", "confidence": "high",
+                 "review": "accepted", "bugs": ["burst#3"], "doc": "docs/debug/burst/20261103-101500-a1b2-1.md"},
       "flaky": false,
       "attempts": [
         {"try": 1, "status": "fail", "reason": "UVM_ERROR=1 > 0", "duration_s": 398.214,
@@ -207,6 +215,10 @@ schema 不支持            → 报错（error）
 | 字段 | 说明 |
 |------|------|
 | `summary.passed` | 算通过的数量（pass + xfail + skip） |
+| `jobs[].status` | 最终状态，已包含已接受的分诊结论 |
+| `jobs[].judged_status` | 机械判定（含 expect_fail）的结果，不受分诊影响 |
+| `jobs[].raw_status` | 应用 expect_fail 之前的结果 |
+| `jobs[].triage` | 关联的分诊任务；没有时为 `null` |
 | `jobs[].category` | `design` / `execution` / `environment` / `null`（通过时） |
 | `jobs[].known` | 关联的未解决 bug（verdict.md §9） |
 | `jobs[].attempts[].wave` | 是否为带波形重跑；为 `true` 的尝试不参与最终结果 |
@@ -228,3 +240,95 @@ schema 不支持            → 报错（error）
 | timeout / killed / incomplete / error | `<error message="<reason>">` |
 | skip | `<skipped/>` |
 | pass / xfail | 无子元素；xfail 在 `<system-out>` 中注明 |
+
+## 9. `--json` 输出与错误码
+
+所有命令的 `--json` 输出共用一个外壳（N-17）：
+
+| 字段 | 说明 |
+|------|------|
+| `schema` | 外壳版本，当前为 1 |
+| `command` | 执行的命令，如 `"triage plan"` |
+| `ok` | 是否成功 |
+| `data` | 命令自身的结果；结构见 `solouvm schema <命令>` |
+| `truncated` | `null`，或 `{"omitted": N, "more": "<继续查看的命令>"}`（N-19） |
+| `next` | 建议的下一步命令列表 |
+| `error` | `ok=false` 时存在：`code`、`message`、`file`、`line`、`hint` |
+
+流式命令（`regress` 的进度、`log -f`、`status --watch`）输出 JSON Lines，每行一个事件：`{"schema":1,"event":"job_done","job_id":"…","status":"pass",…}`，最后一行为与上表相同的外壳。
+
+错误码稳定，只增不改（N-18）。首批：
+
+| 错误码 | 退出码 | 含义 |
+|--------|--------|------|
+| `CFG_NOT_FOUND` | 2 | 找不到 `solouvm.conf.py` |
+| `CFG_UNKNOWN_KEY` | 2 | 配置中有未知键 |
+| `CFG_INVALID` | 2 | 配置值类型或取值不合法 |
+| `CFG_LOAD_FAILED` | 2 | 配置文件执行时抛出异常 |
+| `FILES_MISSING` | 2 | 文件清单条目匹配不到文件 |
+| `CASE_INVALID` | 2 | case 定义不合法（重名、字段错误、ready 但缺验收信息） |
+| `RECORD_INVALID` | 2 | 记录不合法（状态与日期不符、bug 重号） |
+| `RECORD_WRITE_FAILED` | 2 | 写回源文件失败，已回滚 |
+| `SELECT_EMPTY` | 2 | 选择条件匹配不到任何 job |
+| `LIMIT_EXCEEDED` | 2 | job 数超过 `limits.max_jobs` |
+| `ROLE_DENIED` | 2 | 当前角色不允许执行该命令 |
+| `BUILD_FAILED` | 2 | 编译失败 |
+| `PROVIDER_FAILED` | 2 | ssh、rsync、bsub 等外部命令失败 |
+| `RUN_NOT_FOUND` / `JOB_NOT_FOUND` / `TASK_NOT_FOUND` | 2 | 引用的 ID 不存在 |
+| `TRIAGE_INVALID` | 2 | 分诊结论不合法（缺证据、与任务类型不相容） |
+| `HOOK_FAILED` | 2 | hook 抛出异常 |
+| `TESTS_FAILED` | 1 | 回归中有不算通过的结果 |
+| `CHECK_FAILED` | 1 | `check` 发现代码错误 |
+| `TRIAGE_PENDING` | 1 | `triage status`：存在未审查的任务 |
+| `INTERRUPTED` | 130 | 被中断 |
+
+## 10. `triage/tasks.json`
+
+```json
+{
+  "schema": 1,
+  "run_id": "20261103-101500-a1b2",
+  "policy": {"pass_policy": "changed", "group_by": "signature"},
+  "tasks": [
+    {
+      "id": "20261103-101500-a1b2/1",
+      "kind": "fail",
+      "case": "burst",
+      "jobs": ["burst__4417", "burst__88", "burst__1290"],
+      "signature": "3fa9c2e1",
+      "reason": "UVM_ERROR=1 > 0",
+      "result": {
+        "verdict": "design_bug", "confidence": "high", "summary": "…",
+        "evidence": ["log:812", "rtl/axi_slv.sv:120", "wave:1234ns tb_top.dut.addr_q"],
+        "bugs": ["burst#3"], "doc": "docs/debug/burst/20261103-101500-a1b2-1.md",
+        "author": "triage:agent-7f2c", "at": "2026-11-03T11:20:41+08:00"
+      },
+      "review": {"decision": "accepted", "reason": null, "author": "main", "at": "…"}
+    }
+  ]
+}
+```
+
+- `kind`：`fail`（失败类，按签名合并）或 `pass`（分诊是否虚假 pass）；
+- `result` 与 `review` 未写入时为 `null`；
+- 同样的结论也以 `Triage` 记录写回 case 源文件（M-24），`tasks.json` 是本轮的索引，case 记录是长期存档。
+
+## 11. 调试文档
+
+路径 `docs/debug/<case>/<run_id>-<任务序号>.md`，入库。`triage write --doc` 校验以下章节存在且非空：
+
+```markdown
+# <case> 分诊：<一句话结论>
+
+- 任务：20261103-101500-a1b2/1
+- 结论：design_bug（置信度 high）
+- 关联 bug：burst#3
+
+## 现象
+## 排查过程
+## 证据
+## 结论
+## 建议
+```
+
+solouvm 在写入时补全头部的元信息（任务、结论、bug、作者、时间），文档正文由子 agent 编写。

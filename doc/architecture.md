@@ -48,6 +48,10 @@ A 与 B 是同一台机器时（`local` provider），这套结构不变，只�
 | judge | A | `job.facts`、日志流 | `Result` 列表 | `judge` |
 | report | A | `Result` 列表、case 记录 | 终端摘要、`results.json`、JUnit 等 | 归入 `judge` |
 | history | A | 本轮全部产物 | `runs/<run_id>/` 归档、`latest` 链接 | — |
+| triage | A | 判定结果、case 记录、系统文档 | 分诊任务、上下文包；子 agent 写回的记录与调试文档 | — |
+| review | A | 分诊结论 | 最终状态、审查记录 | — |
+
+triage 与 review 不在 `regress` 内自动执行：回归结束后由主 agent（或人）显式调用 `triage plan`，再为每个任务启动子 agent，最后逐个 `triage review`。完整流程见 [ai-workflow.md](ai-workflow.md)。
 
 retry（R-01）不是新阶段，而是 judge 之后对失败 job 再走一遍 gen（子集）→ run → judge。
 
@@ -62,6 +66,9 @@ retry（R-01）不是新阶段，而是 judge 之后对失败 job 再走一遍 g
 | `rerun` | ✓ | ✓ | 上一轮失败子集 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `judge` | ✓ | ✓ | 读已有 plan | | | | | ✓ | ✓ |
 | `notes` / `doc` / `progress` | ✓ | ✓ | | | | | | | 读历史 |
+| `validate` | ✓ | ✓ | | | | | | | |
+| `explain` / `triage *` | ✓ | ✓ | 读已有 plan | | | | | 读已有结果 | |
+| `bug` / `note` / `todo` 写入 | ✓ | ✓ | | | | | | | |
 | `check` | ✓ | ✓ | | 生成 fake_top | 视 provider | slang / tb 编译 | | | |
 
 `judge` 也要 collect：判定参数（checks、waiver）和 case 记录（报告里的"已知问题"）都来自当前的 case 定义，这正是"改了规则不用重跑"（J-08）的来源。
@@ -74,6 +81,10 @@ Python 包结构如下，括号内为主要承担的需求区。
 solouvm/
   __init__.py          公开 API：Case、Bug、Todo、Log、Note，以及 Z-08 的函数入口
   cli.py               参数解析、命令分发、退出码；不含业务逻辑            (L)
+  ui.py                终端输出：rich 的唯一入口；非终端与 --json 时退化为纯文本 (N-22)
+  _vendor/             rich、pygments、markdown-it-py、mdurl；vendor.txt 锁定版本 (N-02)
+  output.py            人类输出与 --json 外壳、截断、next 建议、错误码        (N-17 ~ N-21)
+  roles.py             角色与命令白名单                                      (AI-10)
   errors.py            异常层级与退出码映射                                  (N-07, N-09)
   model.py             纯数据：Case、记录类型、Job、Plan、Facts、Result      (T, M)
   config/
@@ -105,6 +116,15 @@ solouvm/
     signature.py       错误签名归一化                                        (J-11)
   report/
     text.py json.py junit.py html.py                                         (K)
+  records/
+    write.py           记录写回 Python 源文件：ast 定位、插入、重载校验、回滚 (M-14)
+  triage/
+    plan.py            生成分诊任务、按签名合并                              (AI-05)
+    packet.py          组装上下文包、长度控制                                (AI-06)
+    result.py          写入结论与调试文档、校验                              (AI-07, AI-16)
+    review.py          审查与最终状态更新                                    (AI-09)
+  explain.py           单个 job 的排查信息、源码片段解析                     (AI-04, AI-15)
+  wave.py              波形文本查询（经 transport 在 B 上执行导出工具）      (AI-13)
   notes/
     query.py           跨 case 查询记录                                      (M-06, M-07)
     export.py          markdown 导出                                         (M-08 ~ M-10)
@@ -112,6 +132,11 @@ solouvm/
   check/
     slang.py faketop.py incremental.py                                       (E)
   history.py           runs 目录、env 信息、保留策略                         (Y)
+  uvmgen/
+    spec.py            tbspec.py 的数据模型：Env、Agent、Signal、Field       (U-02)
+    render.py          模板渲染（string.Template），写文件头与用户代码区      (U-01, U-06)
+    regions.py         用户代码区的提取、合并、.orphan 输出                   (U-04, U-05)
+    templates/         内置模板，按 style 版本组织                            (U-06)
   hooks.py             A 端 hook 的加载与执行                                (W)
 ```
 
@@ -123,6 +148,9 @@ cli ─▶ 各业务模块 ─▶ model / errors
                   ▶ gen.shell（凡是产出 shell 文本的模块）
 
 providers ✗─▶ judge      provider 只搬运字节，不理解内容
+triage    ─▶ judge / explain / records   分诊只读判定结果，写入只经 records.write
+records.write 是唯一修改用户 Python 源文件的模块；uvmgen 是唯一生成或修改 SV 文件的模块
+任何模块 ✗─▶ _vendor   只有 ui.py 可以 import _vendor 中的库
 judge     ✗─▶ providers  judge 只吃一个"按行迭代"的输入，不关心来自本地还是远端
 backends  ✗─▶ providers  后端只产出命令模板与错误模式
 ```
@@ -149,11 +177,13 @@ A 和 B 上的目录树形状相同，路径都相对项目根（N-05）。差�
         plan.json                           本轮计划                                [A 写，只留在 A]
         env.json                            环境信息（Y-02）                        [A 写]
         results.json  results.txt  junit.xml                                       [A 写]
+        triage/tasks.json                   本轮分诊任务、结论、审查                [A 写]
         launch.pid                          本轮 make 的进程组 ID                   [B 写]
         <job_id>/try<N>/                    第 N 次尝试的运行目录                   [B 写]
           sim.log  job.facts  波形  覆盖率库 ...
       latest -> <run_id>
     solouvm.log                             solouvm 自身的调试日志（Z-07）          [A 写]
+  docs/debug/<case>/<run_id>-<序号>.md      调试文档，入库                          [A 写，经 triage write]
 ```
 
 要点：
@@ -319,6 +349,7 @@ A 对本轮判定为 `fail` / `timeout` / `killed` / `error`（环境失败）�
 
 ## 8. Case 记录
 
+- 记录写回只有一条路径：`records/write.py`。它依据"`notes=[...]` 是 `Case(...)` 最后一个参数"的约定，用 `ast` 找到列表末尾的位置，按原文件缩进插入新记录的源码文本，然后重新加载整个 case 文件并校验；任何一步失败都恢复原文件（M-14）。
 - 记录在 collect 阶段随 `Case` 一起加载和校验（M-05），只存在于 A 的内存中，**不进入任何生成物**，也不影响 job 的执行。
 - `notes`、`doc`、`progress` 只读：case 定义 + `runs/` 历史，不触发 gen、push 或 run。
 - 报告联动（M-11、M-22）在 report 阶段完成：拿 `Result` 的 case 与种子去匹配记录。

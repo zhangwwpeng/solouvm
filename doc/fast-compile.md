@@ -21,7 +21,7 @@ solouvm check
 
 ### 2.1 调用方式
 
-solouvm 调用 `slang` 可执行文件（E-01），不使用 pyslang，以保持 A 端零依赖（N-02）。
+solouvm 调用 `slang` 可执行文件（E-01），不使用 pyslang：它是编译型扩展，无法以 vendor 方式内置（N-02）。
 
 ```text
 slang -f .solouvm/gen/check.f --lint-only --diag-json - [check.slang_args...]

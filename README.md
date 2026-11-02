@@ -40,17 +40,30 @@ SystemVerilog / UVM 仿真回归的 Python Runner。
 | provider | 在哪台机器、用什么方式执行 | `local`、`ssh`、`lsf`，可叠加，如 `ssh → lsf` |
 | sync | 代码和生成物怎么到 B | `none`（共享盘）、`rsync`、`git` |
 
-## 2. 设计原则
+## 2. 人与 AI 协作
+
+solouvm 由人和 AI 共用同一套命令，所有命令都支持 `--json`。以 AI 为主力时的标准流程：
+
+1. **主 agent 写 case**：除了参数，还要写清 `intent`（验证什么）、`method`（怎么激励、怎么检查）、`expect`（通过时一定能观察到的现象）；`solouvm validate` 自检。
+2. **提交回归**：`solouvm regress`，执行并机械判定；`expect` 不满足的 job 直接判失败，拦截最常见的虚假 pass。
+3. **子 agent 分诊**：`solouvm triage plan` 把失败（按签名合并）和可疑的通过拆成任务；每个任务交给一个子 agent。子 agent 读系统文档、case 文档、代码、日志、波形，判断"是否虚假 pass、失败原因在哪"，登记 bug、写调试文档后退出。
+4. **主 agent 审查**：`solouvm triage review` 接受或驳回每个结论，然后修 case、修 RTL 或签核。
+
+子 agent 只有读权限，以及经 solouvm 命令追加记录的权限：它可以把通过判为虚假 pass，但永远不能把失败判为通过，也不能修改 case 的判定条件。详见 [doc/ai-workflow.md](doc/ai-workflow.md)。
+
+## 3. 设计原则
 
 - **Python 是唯一的配置语言**：配置就是 Python 模块，不解析 YAML / JSON / TOML。
-- **A 上零第三方依赖**：只用 Python 标准库，要求 Python >= 3.10。
+- **A 上不需要安装任何依赖**：Python >= 3.10 加上 solouvm 自身即可运行；rich 等第三方库以 vendor 方式内置，拷过去就能用。
+- **人看得舒服，AI 读得准确**：终端里用 rich 输出彩色日志、表格和进度条；`--json` 或被程序读取时输出纯文本或 JSON。
+- **所有 UVM 环境同一个风格**：agent、env、test、sequence 一律由模板生成，AI 和人只在生成的结构里填逻辑，规范见 [doc/uvm-style.md](doc/uvm-style.md)。
 - **生成物可以独立使用**：生成的 `Makefile` 拿到任何一台有 `make` 的机器上都能跑，不依赖 solouvm。
 - **只用相对路径**：项目目录可以搬到另一台机器、另一个路径下直接使用。
 - **Linux 与 macOS 都支持**：平台差异在生成的脚本里于运行时处理。例如超时依次尝试 `timeout`、`gtimeout`、内置 bash 实现。
 - **判定可预期**：规则固定、按优先级执行。挂死、被信号杀死、日志被截断、读到上一轮的残留结果，都不会被误判为 pass。
 - **出错就停，并说清楚原因**：不吞异常，不静默降级，报错时附带下一步建议。
 
-## 3. 使用示意
+## 4. 使用示意
 
 以下是目标形态的示例，细节可能随设计调整。
 
@@ -117,6 +130,9 @@ Case(
     uvm_test="burst_test",
     owner="wp",
     stage="wip",                    # planned / wip / ready / signoff
+    intent="验证 WRAP burst 跨 4K 边界时的地址回绕",
+    method="随机 WRAP 读写；scoreboard 逐笔比对，SVA 检查地址",
+    expect=[Expect(regex=r"\[SCB\] compared (\d+)", min=100)],   # 机械拦截虚假 pass
     doc="验证 AXI burst：INCR / WRAP / FIXED，长度 1–256。",
     notes=[
         Bug(id=1, title="WRAP 跨 4K 边界时地址回绕错误", status="open", seed=4417, found="2026-11-02"),
@@ -147,10 +163,13 @@ make build && make -j16 regress
 solouvm judge
 ```
 
-## 4. 计划中的命令
+## 5. 计划中的命令
 
 | 命令 | 作用 |
 |------|------|
+| `init` | 生成起步项目：配置、示例 UVM 环境、示例 case，开箱可跑 |
+| `new agent\|env\|test\|seq\|vseq` | 按统一模板生成 UVM 组件 |
+| `uvm sync` | 按模板与 `tbspec.py` 重新生成组件，保留用户代码区 |
 | `gen` | 收集文件和 case，生成全部产物 |
 | `build` | 生成，并在 B 上编译 |
 | `run` / `regress` | 生成、编译，跑选中的 / 全部 job，然后判定 |
@@ -163,20 +182,25 @@ solouvm judge
 | `progress` | 验证进度总览：各阶段 case 数、通过率、按 owner 统计的未解决 bug 与 todo |
 | `init` / `doctor` | 生成最小项目 / 检查控制机与执行机的环境 |
 | `status` / `log` / `stop` | 查看进行中的回归 / 读取执行机上的日志 / 终止本轮回归 |
+| `validate` | 只校验配置、case、记录，不生成任何文件 |
+| `explain` | 一次给出排查一个 job 所需的全部信息 |
+| `triage plan / packet / write / review / status` | 分诊：生成任务、取上下文包、写结论、审查、查看进度 |
+| `bug add / update`、`note add`、`todo add / done` | 经命令行写入 case 记录 |
+| `wave` | 以文本方式查询波形中的信号值 |
 | `clean` | 清理生成物与运行目录 |
 
 退出码：0 全部通过；1 有测试失败；2 配置、环境或编译错误；130 被中断。
 
-## 5. 不做什么
+## 6. 不做什么
 
 - 不解析 YAML / JSON / TOML 配置。
 - 不在执行机上做判定。
 - 不把波形、覆盖率库回传到控制机。
-- 不管调试：波形查看、Verdi 等 GUI 在执行机上自行使用。
+- 不管交互式调试：Verdi 等 GUI 在执行机上自行使用；只提供只读的文本化波形查询。
 - 不做 IP 依赖管理：交给 FuseSoC / Bender，再导入它们输出的 `.f`。
 - 不做 lint、formal、综合流程。
 
-## 6. 文档
+## 7. 文档
 
 | 文档 | 内容 |
 |------|------|
@@ -187,6 +211,8 @@ solouvm judge
 | [doc/verdict.md](doc/verdict.md) | 判定规则、waiver、expect_fail、retry、失败签名 |
 | [doc/fast-compile.md](doc/fast-compile.md) | slang 检查、fake_top、RTL 增量编译 |
 | [doc/formats.md](doc/formats.md) | `job.facts`、`plan.json`、`results.json` 等文件格式 |
+| [doc/ai-workflow.md](doc/ai-workflow.md) | 主 agent / 子 agent 分诊流程、权限边界、上下文包 |
+| [doc/uvm-style.md](doc/uvm-style.md) | UVM 环境风格规范：目录、命名、消息约定、用户代码区 |
 | [doc/decisions.md](doc/decisions.md) | 设计决策记录：理由、代价、备选 |
 | [todo.md](todo.md) | 实现进度 |
 
@@ -194,6 +220,6 @@ solouvm judge
 
 README 是总纲，只写结论与边界；细节以 `doc/` 为准，二者冲突时修正其一，不留两套说法。
 
-## 7. 许可证
+## 8. 许可证
 
 MIT，见 [LICENSE](LICENSE)。

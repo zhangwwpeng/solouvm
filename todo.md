@@ -1,11 +1,11 @@
 # TODO
 
-实现进度。需求本身（内容、优先级、理由）见 [doc/requirements.md](doc/requirements.md)，这里只按编号记录做到哪了。
+实现进度。需求本身（内容、优先级、理由）见 [doc/requirements.md](doc/requirements.md)，里程碑划分见其 §25。
 
 ## 文档
 
 - [x] README.md
-- [x] doc/requirements.md
+- [x] doc/requirements.md（含里程碑）
 - [x] doc/architecture.md
 - [x] doc/config.md
 - [x] doc/cli.md
@@ -13,9 +13,16 @@
 - [x] doc/fast-compile.md
 - [x] doc/formats.md
 - [x] doc/decisions.md
+- [x] doc/ai-workflow.md
+- [x] doc/uvm-style.md
 - [ ] 用户 review，修订
-- [ ] fast-compile.md §5 待验证事项（需要真实工具环境）
+- [ ] 调研：slang 参数与 UVM 解析（fast-compile.md §5）
+- [ ] 调研：波形文本导出工具（AI-13）
+- [ ] 调研：rich 及依赖的 vendor 方式与体积（D37）
 
 ## 代码
 
-文档 review 完成后开始。首版范围 = requirements.md 中全部 P0。
+- [ ] M1 核心闭环（本机）
+- [ ] M2 远程与重跑
+- [ ] M3 fast compile
+- [ ] M4 周边

@@ -10,6 +10,7 @@
 2. **规则顺序固定，先命中者为准。** 用户只能调参数（上限、正则、waiver），不能调顺序。
 3. **能挽回失败的手段只有三个，且范围都很窄**：`pass_regex` 只挽回"缺 Report Summary"；waiver 只豁免被它匹配到的那几行；`expect_fail` 只把 fail 翻成 xfail。
 4. **判定可重复。** 同样的 facts、日志、配置，结论一定相同；改了配置就重新 `judge`，不用重跑。
+5. **AI 分诊只能往下判。** 分诊可以把 pass 判为 `false_pass`，不能把任何失败判为通过（AI-08）。
 
 ## 2. 结果状态
 
@@ -24,6 +25,7 @@
 | `incomplete` | 开始了但没有结束：中断、机器崩溃 | | 执行异常 |
 | `error` | 环境失败或无法判定：license、没有 facts、残留结果 | | 环境 |
 | `skip` | 没有运行，且明确允许缺失（`--allow-missing`） | ✓ | — |
+| `false_pass` | 机械判定为 pass，但经分诊并审查确认没有真正验证到 `intent` | | 设计 / 测试 |
 
 报告按类别分开统计（J-16），让"设计有 bug"和"环境不稳"一眼可分。
 
@@ -47,9 +49,12 @@
 | 10 | UVM_WARNING 超限（仅当设置了上限） | `fail` | `UVM_WARNING=31 > 30` |
 | 11 | UVM 日志但缺 Report Summary，且 `pass_regex` 未命中 | `fail` | `UVM log without Report Summary` |
 | 12 | 非 UVM 日志，缺 `SOLOUVM_DONE status=pass` | `fail` | `missing SOLOUVM_DONE marker` |
-| 13 | 以上都没有命中 | `pass` | `clean` |
+| 13 | `expect` 中任一条不满足 | `fail` | `expect not met: [SCB] compared = 0 < 100` |
+| 14 | 以上都没有命中 | `pass` | `clean` |
 
-随后应用 `expect_fail`（§6）。
+随后应用 `expect_fail`（§6）。分诊审查可能在此之后把 pass 改为 `false_pass`（§11）。
+
+`expect` 排在最后：前面的规则查的是"有没有报错"，`expect` 查的是"有没有真的做事"。一个既没报错、也没做事的 job，正是最典型的虚假 pass。
 
 几点说明：
 
@@ -180,11 +185,38 @@ UVM_ERROR tb/scb.sv(120) @ 1234ns: uvm_test_top.env.scb [SCB] addr 0x1f00 expect
 | 某个 `fixed` bug 的复现种子本轮通过 | `burst#1 can be marked verified`（M-22） |
 | 某个 `open` bug 的复现种子本轮通过 | `burst#1 may be fixed`（M-13） |
 
-## 10. 退出码映射
+## 10. 虚假 pass 的弱信号
+
+以下情况不足以直接判 fail，但很可疑，报告中标出并纳入分诊（J-19）：
+
+| 信号 | 说明 |
+|------|------|
+| 仿真结束时间为 0 或远短于该 case 历史中位数（低于 10%） | objection 可能提前撤销 |
+| UVM 日志中没有任何来自 `uvm_test_top` 的消息 | test 可能根本没运行 |
+| 日志行数远少于该 case 历史中位数（低于 10%） | 激励可能没发出去 |
+| case 没有任何 `expect` | 无法机械确认做过事 |
+
+历史中位数取自 A 上的运行历史（Y-01），没有历史时只检查前两条中的"为 0"部分与最后一条。
+
+## 11. 分诊对最终状态的影响
+
+分诊结论只有经主 agent 审查接受后才生效（AI-09）：
+
+| 机械结果 | 分诊结论（已接受） | 最终状态 |
+|----------|--------------------|----------|
+| `pass` | `real_pass` | `pass` |
+| `pass` | `false_pass` | `false_pass` |
+| 失败类 | `design_bug` / `tb_bug` / `spec_unclear` / `unknown` | 不变 |
+| 失败类 | `env_issue` | `error`（环境类） |
+| 任意 | 驳回或未审查 | 不变；报告中标出"待审查" |
+
+`results.json` 同时保留机械结果 `judged_status` 与最终状态 `status`，便于看出哪些结论来自分诊。
+
+## 12. 退出码映射
 
 判定完成后，回归类命令的退出码：
 
-- 存在任一不算通过的状态 → 1；
+- 存在任一不算通过的状态（含已接受的 `false_pass`）→ 1；
 - 否则 → 0。
 
 编译失败、配置错误等在判定之前就已经以 2 退出，见 [cli.md](cli.md) §1.1。

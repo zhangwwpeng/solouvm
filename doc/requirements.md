@@ -4,7 +4,7 @@
 
 ## 0. 约定
 
-**编号**：`<领域字母>-<序号>`，例如 `H-03`。编号一经发布不再复用；需求删除时标注"已废弃"，不挪号。
+**编号**：`<领域代号>-<序号>`，例如 `H-03`、`AI-05`。编号一经发布不再复用；需求删除时标注"已废弃"，不挪号。
 
 **优先级**：
 
@@ -27,6 +27,16 @@
 | provider | 决定"在哪台机器、用什么方式执行命令"的插件，例如 local、ssh、lsf |
 | sync | 决定"文件怎么到 B"的插件，例如 none、rsync、git |
 
+**里程碑**：优先级表示重要程度，里程碑决定实现顺序。每条需求属于哪个里程碑见文末 §25。
+
+| 里程碑 | 目标 |
+|--------|------|
+| M1 核心闭环 | 本机执行：生成 UVM 环境 → 写 case → `validate` → `regress` → 判定（含 expect）→ `explain` → 分诊全流程 → 记录写回；只有 local provider |
+| M2 远程与重跑 | ssh / rsync / lsf；retry、失败带波形重跑；运行历史与对比；`uvm sync` |
+| M3 fast compile | slang 检查、fake_top；风格检查 |
+| M4 周边 | 文档导出、进度总览、覆盖率、波形文本查询、HTML 报告、doctor |
+| 待定 | 暂不排期，保留记录 |
+
 ## 1. 总体约束
 
 这些是贯穿所有功能的硬约束，违反任何一条都视为缺陷。
@@ -34,7 +44,7 @@
 | 编号 | 约束 | 优先级 |
 |------|------|--------|
 | N-01 | 配置只用 Python：`solouvm.conf.py` / `filelist.py` / `case.py`，不解析 YAML / JSON / TOML 配置 | P0 |
-| N-02 | A 上运行时只依赖 Python 标准库，Python >= 3.10 | P0 |
+| N-02 | A 上不需要安装任何依赖：Python >= 3.10 加上 solouvm 自身即可运行；第三方纯 Python 库只能以 vendor 方式内置（`solouvm/_vendor/`），锁定版本并保留许可证 | P0 |
 | N-03 | 生成物离开 solouvm 也能独立使用：在 B 上只靠 `make` 就能编译、跑 job | P0 |
 | N-04 | B 上不需要安装 solouvm，也不需要 Python；只需要 `make`、`bash`、POSIX 工具和仿真器 | P0 |
 | N-05 | 生成物里只出现相对项目根的路径，整个项目目录可以搬到另一台机器、另一个路径下直接使用 | P0 |
@@ -48,6 +58,13 @@
 | N-13 | 生成物记录生成它的 solouvm 版本与格式版本；A 读到不兼容版本的事实文件时报错，提示重新生成 | P0 |
 | N-14 | 同一项目可同时跑多轮回归（不同人、不同分支），彼此的运行目录、结果互不覆盖 | P1 |
 | N-15 | 命令行输出、错误信息、日志一律英文；面向人阅读的导出文档语言可配置（Q8） | P0 |
+| N-16 | 人和 AI 使用同一套命令与数据；不存在"AI 专用"的隐藏接口 | P0 |
+| N-17 | 每个命令都支持全局参数 `--json`，输出带 schema 版本的固定结构；默认输出给人看 | P0 |
+| N-18 | 出错时（含 `--json` 模式）给出稳定的错误码、出错的文件与行号、修复建议 | P0 |
+| N-19 | 输出量有上限：日志、列表、报告默认截断，并注明省略了多少、用什么命令继续查看 | P0 |
+| N-20 | 不弹任何交互式确认；需要确认的操作一律通过显式参数表达 | P0 |
+| N-21 | 输出中引用的轮次、job、bug、分诊任务一律给出实际 ID，不只写 `latest` | P0 |
+| N-22 | 人类输出使用 rich（vendor 内置）：彩色日志、表格、进度条；`--json` 或标准输出不是终端时一律输出纯文本或 JSON，不含颜色与控制字符。rich 只经 `solouvm/ui.py` 使用 | P0 |
 
 ## 2. 配置（C）
 
@@ -59,7 +76,7 @@
 | C-04 | 加载时校验类型与取值范围，未知键报错并提示最接近的合法键 | P0 | 防止拼写错误被静默忽略 |
 | C-05 | 配置文件名禁止使用 `solouvm.py`，检测到时报错说明原因 | P0 | 会遮蔽库本身 |
 | C-06 | 本地覆盖文件 `solouvm.local.py`（不入库）：选择使用哪个 provider，并填写个人字段（主机、用户名、远端目录、并行数） | P1 | Q2 |
-| C-07 | 支持多套命名配置（profile），例如 `--profile nightly` 切换 seeds、jobs、checks | P2 | |
+| C-07 | 支持多套命名配置（profile），例如 `--profile nightly` 切换 seeds、jobs、checks | P3 | 降级：AI 为主力后价值下降 |
 | C-08 | `solouvm config` 打印合并后的最终配置及每个值的来源（默认 / 配置文件 / 本地覆盖 / 命令行） | P1 | |
 
 ## 3. 文件收集（F）
@@ -99,6 +116,7 @@
 | T-15 | case 之间的依赖（A 通过后才跑 B） | P3 | |
 | T-16 | 分片：`--shard i/n` 把 job 稳定地分成 n 份，只生成第 i 份 | P1 | 给外部调度器分发用 |
 | T-17 | 选择条件匹配不到任何 job 时退出码为 2，并提示最接近的 case 名或 tag；加 `--allow-empty` 时返回 0 | P0 | Q9；防止 CI 空跑显示通过 |
+| T-18 | 单条命令派发的 job 数超过 `limits.max_jobs` 时拒绝执行，需显式 `--force` | P0 | 防止人或 AI 误起大量仿真 |
 
 ## 5. 编译（D）
 
@@ -198,7 +216,7 @@
 | J-04 | `pass_regex` 只能挽回"缺 Report Summary"这一条，不能覆盖硬失败 | P0 | |
 | J-05 | 非 UVM 测试平台用 `SOLOUVM_DONE status=pass` 标记完成 | P0 | |
 | J-06 | `expect_fail` 在判定之后应用：fail → xfail（算通过），pass → xpass（算失败） | P0 | |
-| J-07 | 结果状态集合：pass / fail / timeout / killed / error / xfail / xpass / skip / incomplete | P0 | |
+| J-07 | 结果状态集合：pass / fail / timeout / killed / error / xfail / xpass / skip / incomplete / false_pass | P0 | `false_pass` 只能经分诊审查产生（AI-09） |
 | J-08 | 不重跑仿真、只重新判定：`solouvm judge` 可反复执行，规则改动后直接生效 | P0 | 判定在 A 的直接收益 |
 | J-09 | 未跑的 job 默认记为 error；`--allow-missing` 时记为 skip | P0 | 分片场景 |
 | J-10 | 每个失败 job 记录首条错误行及行号 | P1 | |
@@ -209,6 +227,8 @@
 | J-15 | 仿真器自身的错误也计入判定：VCS `Error-[`、xrun `*E,`、Questa `** Error`、SVA 断言失败，模式由后端提供 | P0 | 有些错误不走 UVM 报告 |
 | J-16 | 失败分三类：设计 / 测试失败（fail）、环境失败（license、磁盘满、主机故障，记 error）、执行异常（timeout、killed）；报告分开统计 | P1 | 环境失败不该让设计背锅 |
 | J-17 | 不稳定（flaky）识别：同一 job 在历史中时过时不过，报告中标出 | P2 | 依赖 Y 区运行历史 |
+| J-18 | `Case.expect`：机械可查的期望，如某正则至少匹配 N 次、某计数不小于 N、仿真结束时间不早于 T；不满足即 fail | P0 | 拦截虚假 pass；见 AI-02 |
+| J-19 | 内置的虚假 pass 弱信号：仿真结束时间为 0、UVM 日志中没有任何来自 test 的消息、日志行数异常少；只报警，交给分诊 | P1 | 不直接判失败 |
 
 ## 11. 重跑（R）
 
@@ -264,9 +284,9 @@
 
 | 编号 | 需求 | 优先级 | 备注 |
 |------|------|--------|------|
-| W-01 | A 上的 hook 阶段：`main`（包住整条命令）、`gen`、`push`、`build`、`run`、`judge`；文件 `pre_hook_<阶段>.py` / `post_hook_<阶段>.py`，函数 `hook(ctx)` | P1 | Q6 |
-| W-02 | hook 抛异常时命令中止，退出码 2 | P1 | |
-| W-03 | `--no-hooks` 跳过全部 hook | P1 | |
+| W-01 | A 上的 hook 阶段：`main`（包住整条命令）、`gen`、`push`、`build`、`run`、`judge`；文件 `pre_hook_<阶段>.py` / `post_hook_<阶段>.py`，函数 `hook(ctx)` | P3 | Q6；降级：分诊流程已覆盖大部分扩展需求 |
+| W-02 | hook 抛异常时命令中止，退出码 2 | P3 | 随 W-01 |
+| W-03 | `--no-hooks` 跳过全部 hook | P3 | 随 W-01 |
 | W-04 | B 上的 hook：`pre_job` / `post_job`，在 `CFG` 中写 shell 片段，生成进 `run_job.sh` | P2 | Q6；B 上没有 Python |
 
 ## 16. 命令行（L）
@@ -281,7 +301,9 @@
 | L-06 | 选择参数：`--case`、`--tag`、`--exclude-tag`、`--seed` / `--seeds`、`--shard`、`--allow-empty` | P0 | `--shard` 为 P1 |
 | L-07 | shell 自动补全（bash / zsh） | P3 | |
 | L-08 | 命令：`notes`（查询 case 记录）、`doc`（导出 markdown）、`progress`（进度总览） | P1 | 见 M 区 |
-| L-09 | 命令：`init`（P0）；`doctor`、`status`、`log`、`stop`（P1）；`history`（P2） | P0 | 见 Z、Y 区；`stop` 见 Q3 |
+| L-09 | 命令：`init`、`log`、`validate`（P0）；`doctor`、`status`、`stop`、`schema`（P1）；`history`、`help`（P2） | P0 | 见 Z、Y 区；`stop` 见 Q3 |
+| L-10 | 命令：`explain`、`triage plan / packet / write / review / status`、`bug add / update`、`note add`、`todo add / done`（P0）；`wave`（P1）；`bisect`（P2） | P0 | 见 AI、M 区 |
+| L-11 | 全局参数：`--json`（N-17）、`--role`（AI-10） | P0 | |
 
 ## 17. Case 记录（M）
 
@@ -322,7 +344,7 @@ Case(
 | M-11 | 回归报告联动：失败 job 所属 case 有 open bug 时，在报告中标出"已知问题 burst#1" | P2 | 只做标注，不改判定；预期失败仍用 `expect_fail` |
 | M-12 | 复现：`solouvm run --note burst#1` 用该 bug 记录的种子重跑 | P2 | |
 | M-13 | 关闭提示：open bug 的复现种子连续 N 轮通过时，在报告中提示"可能已修复" | P3 | 与 M-22 合并实现 |
-| M-14 | 命令行登记：`solouvm bug add burst "标题" --seed 4417`，直接写回 Python 源文件 | P3 | 改写用户源码有风险，先评估 |
+| M-14 | 命令行写入记录：`bug add`、`bug update`、`note add`、`todo add`、`todo done`、`triage write`。写回 Python 源文件：按 M-15 的约定用 `ast` 定位 `notes=[...]` 的末尾插入，写后重新加载校验，失败即回滚 | P0 | AI 分诊的唯一写入路径（AI-08） |
 | M-15 | 大项目可以每个 case 一个文件 `cases/<name>.py`，导出 `CASE = Case(...)`；配置 `CFG["case_dirs"] = ["cases"]` 后自动收集。约定 `notes=[...]` 写在 `Case(...)` 的最后一个参数 | P1 | Q11 |
 | M-16 | `Case.owner`：case 负责人；`Bug` / `Todo` 未写 owner 时继承 case 的 owner | P1 | |
 | M-17 | `Case.stage`：case 开发进度，`planned`（只有计划）→ `wip`（开发中）→ `ready`（可进回归）→ `signoff`（已签核）；另有 `deprecated` | P1 | |
@@ -332,8 +354,35 @@ Case(
 | M-21 | `doc` 导出的总索引包含进度总览（M-20 的内容） | P1 | |
 | M-22 | 回归后提示状态不一致：`verified` 的 bug 其复现种子又失败（疑似回归）；`fixed` 的 bug 复现种子已通过（可转 verified） | P2 | 只提示，不自动改源文件 |
 | M-23 | 记录的数据模型在首版就定下，并带 schema 版本；之后字段只增不改 | P1 | 记录存在用户文件里，改模型等于逼用户迁移 |
+| M-24 | 记录类型 `Triage`：分诊任务 ID、结论、置信度、摘要、证据、调试文档路径、关联 bug、审查结果（接受 / 驳回、理由、审查者） | P0 | 见 AI-07 |
+| M-25 | 每条记录带 `author`（人名或 agent 角色与标识）与写入时间；命令行写入时自动填写 | P0 | 审计 |
 
-## 18. 运行历史与可复现（Y）
+## 18. AI 协作（AI）
+
+主 agent 写 case、提交回归；子 agent 独立分诊；主 agent 审查。完整流程见 [ai-workflow.md](ai-workflow.md)。
+
+| 编号 | 需求 | 优先级 | 备注 |
+|------|------|--------|------|
+| AI-01 | 支持"主 agent 提交 → 子 agent 分诊 → 主 agent 审查"的完整流程，每一步都有对应命令 | P0 | |
+| AI-02 | `Case` 增加 `intent`（验证什么）、`method`（怎么激励、怎么检查）、`spec_refs`（规格出处），与 `expect`（J-18）一起构成 case 的验收信息；`stage` 为 `ready` 及以上时 `validate` 要求齐全 | P0 | 子 agent 判断质量取决于此 |
+| AI-03 | `CFG["system_doc"]`：项目级验证说明文档；`init` 生成骨架，每个上下文包都附带 | P0 | |
+| AI-04 | `solouvm explain <job_id>`：一次给出排查一个结果所需的信息——原因、首条错误、前后日志、源码片段、expect 检查结果、同签名历史、关联 bug、复现命令 | P0 | 人与 AI 共用 |
+| AI-05 | `solouvm triage plan`：按策略生成分诊任务；失败按签名合并为一个任务；pass 按 stage 与是否改动决定是否分诊；策略可在 `CFG["triage"]` 配置 | P0 | |
+| AI-06 | `solouvm triage packet <task>`：输出任务的上下文包（任务说明、系统文档、case 文档与历史记录、本轮结果、explain 内容），总长度有上限，超出部分给路径与查询命令 | P0 | |
+| AI-07 | `solouvm triage write <task>`：写入 `Triage` 记录（M-24），并把调试文档校验后放到 `docs/debug/<case>/<run_id>-<序号>.md`（入库） | P0 | |
+| AI-08 | 子 agent 只能往下判、只能追加：可把 pass 判为 `false_pass`，不能把失败判为通过；只能新增 bug / log / triage 记录与调试文档，不能改 case 的任何其他字段 | P0 | 防止"让 case 变绿" |
+| AI-09 | `solouvm triage review <task> --accept \| --reject 理由`：接受后按结论更新最终状态（`false_pass` 生效、`env_issue` 转 error）；驳回时子 agent 登记的 bug 自动标为 `wontfix` 并附理由 | P0 | |
+| AI-10 | 全局参数 `--role triage`：该角色下只允许只读命令与记录写入命令，其余一律拒绝（退出码 2） | P0 | 与 agent 框架的工具白名单叠加 |
+| AI-11 | `solouvm triage status`：列出某轮全部分诊任务、结论、审查状态，标出未审查项 | P0 | |
+| AI-12 | `solouvm init --agents <框架>`：生成子 agent 定义模板（工具白名单、角色参数、标准流程）；首个支持 Claude Code，其余框架给通用说明 | P1 | |
+| AI-13 | `solouvm wave <job_id> --signals ... --from T --to T`：以有上限的文本表格返回波形中指定信号的值；在 B 上调用厂商工具导出 | P1 | 具体工具待调研；只读查询，不是交互式调试 |
+| AI-14 | `solouvm log` 支持精确读取：`--grep`、`--around 行号`、`--lines 起-止`，输出有上限 | P0 | 扩展 Z-05 |
+| AI-15 | 从 UVM 消息的 `file(line)` 与仿真器错误中解析源码位置，在 explain 与上下文包中附带源码片段 | P0 | |
+| AI-16 | 子 agent 结论必须附置信度与证据（日志行号、源码位置、波形时间点）；`triage write` 校验缺项即拒绝 | P0 | |
+| AI-17 | `solouvm bisect <case> --seed N`：在 git 提交之间二分，找出引入失败的提交 | P2 | |
+| AI-18 | MCP server：用标准库实现 stdio JSON-RPC，把只读命令与记录写入暴露为工具 | P3 | |
+
+## 19. 运行历史与可复现（Y）
 
 | 编号 | 需求 | 优先级 | 备注 |
 |------|------|--------|------|
@@ -344,29 +393,41 @@ Case(
 | Y-05 | `solouvm history <case>`：某个 case 在各轮的结果，用于看 flaky 与回归点 | P2 | |
 | Y-06 | 历史保留策略：保留最近 N 轮或 N 天，可配置 | P2 | |
 
-## 19. 易用性与运维（Z）
+## 20. 易用性与运维（Z）
 
 | 编号 | 需求 | 优先级 | 备注 |
 |------|------|--------|------|
-| Z-01 | `solouvm init`：在当前目录生成最小可跑的三个配置文件和示例 case | P0 | 第一次使用的入口 |
+| Z-01 | `solouvm init`：在当前目录生成起步项目，内容见 U-03 | P0 | 第一次使用的入口 |
 | Z-02 | `solouvm doctor`：检查 A 与 B 的环境——Python 版本、`make`、`bash`、超时实现、仿真器与 slang 是否在 PATH、ssh 连通性、远端目录可写 | P1 | remote 场景排错必需 |
 | Z-03 | `--dry-run`：打印将要 push 的文件、在 B 上执行的命令，不实际执行 | P1 | |
 | Z-04 | `solouvm status`：查看正在进行的回归进度（同 H-13），可在另一个终端执行 | P1 | |
-| Z-05 | `solouvm log <job_id>`：经 provider 读取远端日志，支持 `--tail` / `-f` 跟随 | P1 | 只是看日志，不是调试 |
+| Z-05 | `solouvm log <job_id>`：经 provider 读取远端日志，支持 `--tail` / `-f` 跟随 | P0 | 精确读取见 AI-14 |
 | Z-06 | 提交后立即返回（detach）：`regress --detach` 只推送并启动，之后用 `status` 看进度、`judge` 出结果、`stop` 终止；默认阻塞并显示进度，结束后自动判定 | P1 | Q3 |
 | Z-07 | solouvm 自身的调试日志：`-vv` 打印每条执行的外部命令，并写入 `.solouvm/solouvm.log` | P1 | |
-| Z-08 | Python API：`import solouvm` 后可在脚本中调用 gen / regress / judge / notes，返回结构化结果 | P2 | 方便接 CI 或自研平台 |
+| Z-08 | Python API：`import solouvm` 后可在脚本中调用 gen / regress / judge / notes，返回结构化结果 | P3 | 降级：`--json` 已能满足程序调用 |
 | Z-09 | 配置与 case 的变更提示：`gen` 时对比上一轮，提示新增、删除、参数变化的 case | P3 | |
+| Z-10 | `solouvm validate`：只加载与校验配置、文件清单、case、记录，按 `文件:行` 报告问题，不生成任何文件 | P0 | 改完 case 立即自检 |
+| Z-11 | `solouvm schema [config\|case\|results\|...]`：打印对应结构的 JSON Schema | P1 | |
+| Z-12 | `solouvm help <主题>`：内置离线文档，内容与 `doc/` 一致 | P2 | |
 
-## 20. UVM 框架生成（U）
+## 21. UVM 环境生成（U）
+
+所有 UVM 环境都由 solouvm 按同一套模板生成，AI 与人只在生成的结构里填写逻辑，保证环境风格长期一致。风格规范见 [uvm-style.md](uvm-style.md)。
 
 | 编号 | 需求 | 优先级 | 备注 |
 |------|------|--------|------|
-| U-01 | 生成 UVM 验证环境目录骨架（env、agent、sequence、test、tb_top） | P2 | |
-| U-02 | 根据接口描述生成 agent 模板 | P3 | |
-| U-03 | 生成的骨架自带 `solouvm.conf.py` / `filelist.py` / `case.py`，开箱可跑 | P2 | |
+| U-01 | `solouvm new agent\|env\|test\|seq\|vseq NAME`：按模板生成对应组件的全部文件，放到 uvm-style.md §2 规定的位置 | P0 | |
+| U-02 | `tbspec.py`：用 Python 描述 env 与 agent（接口信号、时钟复位、transaction 字段、主动 / 被动、是否带 scoreboard 与 coverage），生成 interface、transaction、driver / monitor 骨架、coverage 桩 | P0 | |
+| U-03 | `solouvm init` 生成完整的起步项目：配置文件、`tbspec.py`、一个示例 env 与 test、`filelist.py`、示例 case，用 `fake` 后端开箱可跑 | P0 | 与 Z-01 合并 |
+| U-04 | 受保护的用户代码区：生成文件中 `// solouvm:user begin/end <名>` 之间的内容在重新生成时保留；`solouvm uvm sync` 按当前模板与 `tbspec.py` 重新生成全部组件 | P1 | 模板升级可批量作用到所有环境 |
+| U-05 | 重新生成时，模板中已不存在的用户代码区内容写入 `.orphan` 文件，不丢弃；区域外的手工修改报告出来，不静默覆盖 | P1 | |
+| U-06 | 模板内置在 solouvm 中并带版本号；团队可在项目中覆盖模板，但整个项目只允许一套，生成文件头部记录风格与模板版本 | P0 | |
+| U-07 | 目录与 `filelist.py` 的约定使新增组件无需修改 `filelist.py`（按依赖顺序的 glob） | P0 | uvm-style.md §2 |
+| U-08 | `solouvm lint-style`：检查目录、命名、消息 ID、禁止事项是否符合 uvm-style.md | P2 | |
+| U-09 | 生成的组件自带 uvm-style.md §5.2 要求的打印；`new test` 同时在 case 中加入对应的 `expect` | P0 | 与判定、分诊直接衔接 |
+| U-10 | `solouvm uvm diff`：预览 `uvm sync` 将改动哪些文件 | P2 | |
 
-## 21. 自测与质量（Q）
+## 22. 自测与质量（Q）
 
 | 编号 | 需求 | 优先级 | 备注 |
 |------|------|--------|------|
@@ -375,20 +436,20 @@ Case(
 | Q-03 | ssh provider 用本机 sshd 或容器做集成测试 | P1 | |
 | Q-04 | CI 矩阵：Python 3.10–最新，Linux + macOS | P1 | |
 
-## 22. 不做
+## 23. 不做
 
 | 事项 | 理由 |
 |------|------|
 | YAML / JSON / TOML 配置 | 违反 N-01 |
 | 在 B 上做判定、聚合 | 违反 N-10 |
 | 波形、覆盖率数据库回传到 A | 体积大，留在 B 查看即可 |
-| 波形查看、GUI 调试（Verdi / SimVision 拉起） | 调试不归 solouvm 管理 |
+| 交互式调试：拉起 Verdi / SimVision 等 GUI | 交给人在 B 上自行使用；只读的文本化波形查询见 AI-13 |
 | 替代仿真器自身功能（编译选项含义、波形格式） | 只做编排 |
 | IP 依赖 / 包管理 | 交给 FuseSoC / Bender，经 F-06 导入其 `.f` |
 | lint、formal、综合流程 | 超出仿真回归范围；E 区的 slang 检查只用于快速报错 |
 | 通知（邮件、IM） | 用 `post_hook_judge` 实现 |
 
-## 23. 待决问题
+## 24. 待决问题
 
 以下问题均已于 2026-11-03 按推荐答案确认，结论已同步到对应需求。这里保留推理过程，后续整理进 `doc/decisions.md`。新的待决问题追加在末尾。
 
@@ -540,6 +601,20 @@ fake_top 编译 `tb` 组时，如果报出找不到层次路径的错误，提�
 
 推荐约定：`notes=[...]` 写在 `Case(...)` 的最后一个参数。M-14（命令行自动写回）仍为 P3，等这个约定用一段时间后再评估。
 
+> 后续修订：引入 AI 分诊后，M-14 提升为 P0，见 decisions.md D30。
+
 **理由**：一个 case 一个文件，git 冲突少、记录多了也好找；约定好 `notes` 的位置，为以后安全地自动写回留出余地。
 
 **影响**：M-02、M-14、M-15、T-01。
+
+## 25. 里程碑归属
+
+未列出的编号随所在区域的整体安排；有冲突时以本表为准。
+
+| 里程碑 | 需求 |
+|--------|------|
+| M1 | N-01 ~ N-13、N-15 ~ N-22；C-01 ~ C-05；F-01 ~ F-04、F-04a、F-06、F-07、F-10；T-01 ~ T-03、T-06、T-08 ~ T-12、T-17、T-18；D-01、D-03、D-04；G-01 ~ G-06；X-01 ~ X-10、X-13；H-01、H-01a、H-02、H-07、H-12；J-01 ~ J-12、J-15、J-18；R-02；K-01 ~ K-04、K-11；S-01、S-02、S-06 ~ S-09；L-01、L-05、L-06、L-08 ~ L-11；M-01 ~ M-07、M-05a、M-14 ~ M-19、M-23 ~ M-25；AI-01 ~ AI-12、AI-14 ~ AI-16；Y-01、Y-02；Z-01、Z-05、Z-07、Z-10；U-01 ~ U-03、U-06、U-07、U-09；Q-01、Q-02、Q-04 |
+| M2 | N-14；C-06、C-08；F-05；T-04、T-05、T-07、T-16；D-02、D-05；X-11、X-16、X-17；H-03 ~ H-05、H-08 ~ H-11、H-13；J-14、J-16、J-19；R-01、R-03、R-04；K-05 ~ K-07、K-12；S-03、S-04；W-04；M-11 ~ M-13、M-22；Y-03 ~ Y-06；Z-02 ~ Z-04、Z-06、Z-11；U-04、U-05；Q-03 |
+| M3 | E-01 ~ E-05、E-09；L-02；U-08、U-10 |
+| M4 | F-08；T-13、T-14；D-06；X-12、X-14、X-15、X-19；H-15；J-13、J-17；K-08；V-01 ~ V-04；S-05；L-03、L-04；M-08 ~ M-10、M-20、M-21；AI-13；Z-12 |
+| 待定 | C-07；F-09；T-15；E-06 ~ E-08、E-10；X-18；H-06、H-14；K-09、K-10；V-05；W-01 ~ W-03；AI-17、AI-18；Z-08、Z-09；L-07 |

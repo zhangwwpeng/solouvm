@@ -13,7 +13,8 @@
 | `filelist.py` | `FILES = {...}` 或 `files()` | 入库 | 编译文件，分组 |
 | `case.py` | `CASES = [...]` 或 `cases()` | 入库 | case 定义及其记录 |
 | `cases/*.py` | 每个文件 `CASE = Case(...)` | 入库 | 可选：一个 case 一个文件（M-15） |
-| `pre_hook_<阶段>.py` / `post_hook_<阶段>.py` | `hook(ctx)` | 入库 | A 端 hook（W-01） |
+| `tbspec.py` | `ENVS = [...]` | 入库 | UVM 环境描述，供 `solouvm new` / `uvm sync` 生成组件（U-02），见 §6 |
+| `pre_hook_<阶段>.py` / `post_hook_<阶段>.py` | `hook(ctx)` | 入库 | A 端 hook（W-01，待定） |
 
 规则：
 
@@ -85,8 +86,11 @@ CFG = {
 
     "check": {"slang": "slang", "slang_args": [], "exclude": ["ip/encrypted/**"]},
     "case_dirs": ["cases"],
+    "system_doc": ["doc/verif/system.md"],
+    "triage": {"pass_policy": "changed", "packet_limit": 20000, "debug_dir": "docs/debug"},
     "doc": {"lang": "zh", "out": "docs/cases"},
     "history": {"keep": 50},
+    "limits": {"max_jobs": 2000},
     "plugins": [],
 }
 ```
@@ -111,8 +115,11 @@ CFG = {
 | `provider` | str | `"local"` | 默认使用哪个 provider；通常留给 `solouvm.local.py` 设置 | |
 | `check` | dict | 见 2.9 | fast compile 参数 | E |
 | `case_dirs` | list[str] | `[]` | 自动收集 `cases/*.py` 的目录 | M-15 |
+| `system_doc` | list[str] | `[]` | 项目级验证说明文档，附在每个分诊上下文包中 | AI-03 |
+| `triage` | dict | 见 2.10 | 分诊策略 | AI-05 |
 | `doc` | dict | `{"lang": "zh", "out": "docs/cases"}` | 导出文档的语言与默认输出目录 | M-08 |
 | `history` | dict | `{"keep": 50}` | A 端保留最近多少轮结果 | Y-06 |
+| `limits` | dict | `{"max_jobs": 2000}` | 单条命令最多派发的 job 数，超出需加 `--force` | T-18 |
 | `plugins` | list[str] | `[]` | 第三方 provider / 后端的导入路径，如 `"myflow.SlurmLauncher"` | H-15 |
 
 未知键直接报错，并提示最接近的合法键（C-04）。
@@ -247,7 +254,17 @@ rsync 默认排除：`.git/`、`.solouvm/runs/`、`.solouvm/build/`。
 | `faketop` | `True` | 是否执行 UVM 侧 fake_top 编译 |
 | `where` | `"auto"` | `local` / `remote` / `auto`（A 上有 slang 就本地跑） |
 
-### 2.10 环境变量展开
+### 2.10 `triage`
+
+| 键 | 默认值 | 说明 |
+|----|--------|------|
+| `pass_policy` | `"changed"` | 哪些 pass 要分诊：`none` / `changed`（`wip` case 与本轮相对上一轮改动过的 case）/ `all` |
+| `group_by` | `"signature"` | 失败如何合并为任务：`signature` / `case` / `job` |
+| `packet_limit` | `20000` | 上下文包的长度上限（约等于 token 数） |
+| `debug_dir` | `"docs/debug"` | 调试文档的存放目录（入库） |
+| `weak_signals` | `True` | 是否把 J-19 的虚假 pass 弱信号纳入分诊 |
+
+### 2.11 环境变量展开
 
 所有字符串值支持 `${VAR}` 与 `${VAR:-默认值}`，在 A 上加载时展开（C-03）。变量未设置且没有默认值时报错。
 
@@ -337,7 +354,7 @@ FILES = {
 ### 5.1 `Case`
 
 ```python
-from solouvm import Case, Bug, Todo, Log, Note
+from solouvm import Case, Bug, Todo, Log, Note, Expect
 
 CASES = [
     Case(name="smoke", uvm_test="smoke_test", stage="ready", owner="wp"),
@@ -350,6 +367,13 @@ CASES = [
         timeout="1h",
         owner="wp",
         stage="wip",
+        intent="验证 AXI burst 的地址计算与数据完整性，重点是 WRAP 跨 4K 边界",
+        method="随机 INCR / WRAP / FIXED，长度 1–256；scoreboard 逐笔比对读回数据，SVA 检查地址回绕",
+        spec_refs=["AXI4 A3.4.1", "design_spec 5.2"],
+        expect=[
+            Expect(regex=r"\[SCB\] compared (\d+)", min=100),
+            Expect(sim_time_min="50us"),
+        ],
         doc="""
         验证 AXI burst：INCR / WRAP / FIXED，长度 1–256。
         """,
@@ -378,6 +402,10 @@ CASES = [
 | `expect_fail` | bool | `False` | 预期失败 | J-06 |
 | `tags` | tuple[str, ...] | `()` | 标签 | T-10 |
 | `owner` | str \| None | `None` | 负责人 | M-16 |
+| `intent` | str | `""` | 验证什么功能点 | AI-02 |
+| `method` | str | `""` | 激励怎么产生、结果怎么检查 | AI-02 |
+| `spec_refs` | list[str] | `[]` | 对应的规格章节 | AI-02 |
+| `expect` | list[Expect] | `[]` | 机械可查的通过条件，见 §5.5 | J-18 |
 | `stage` | str | `"ready"` | `planned` / `wip` / `ready` / `signoff` / `deprecated` | M-17 |
 | `doc` | str | `""` | 说明文档，markdown；首尾空白与公共缩进会被去掉 | M-01 |
 | `notes` | list | `[]` | 记录；约定写在最后一个参数 | M-02 |
@@ -399,6 +427,10 @@ CASES = [
 | `Todo` | `title`、`owner`、`due`、`done`（默认 `False`）、`id`（可选） | |
 | `Log` | `date`、`text`、`author`（可选） | 调试记录 |
 | `Note` | `text`、`date`（可选） | 一般备注 |
+
+| `Triage` | `task`、`verdict`、`confidence`、`summary`、`evidence`、`doc`、`bugs`、`review` | 只由 `solouvm triage write` / `triage review` 写入（M-24） |
+
+所有记录都有可选字段 `author` 与 `at`（写入时间）；经命令行写入时自动填写（M-25）。
 
 `Todo`、`Log`、`Note` 支持位置参数简写：`Todo("标题")`、`Log("日期", "内容")`、`Note("内容")`。
 
@@ -449,3 +481,76 @@ Waiver(regex=r"...", reason="...", until="2026-12-31")              # 到期后�
 | `until` | 失效日期，过期后不再生效并在报告中提示 |
 
 详细语义见 [verdict.md](verdict.md) §5。
+
+### 5.5 `Expect`
+
+通过时一定能观察到的现象，由 judge 机械检查（J-18）。任一条不满足，job 判为 fail，原因写明是哪一条。
+
+```python
+Expect(regex=r"\[SCB\] compared (\d+)", min=100)   # 第 1 个分组取最后一次匹配的数值，要求 >= 100
+Expect(regex=r"\[SEQ\] burst_seq started", count_min=1)  # 至少出现 1 次
+Expect(regex=r"\[SCB\] mismatch", count_max=0)      # 一次都不能出现
+Expect(sim_time_min="50us")                           # 仿真结束时间不早于 50us
+Expect(uvm_info_min=1, id="SCB")                      # 消息 ID 为 SCB 的 UVM_INFO 至少 1 条
+```
+
+| 字段 | 说明 |
+|------|------|
+| `regex` | 对日志逐行匹配 |
+| `min` / `max` | 对 `regex` 第 1 个捕获分组的数值（取最后一次匹配）做上下限检查 |
+| `count_min` / `count_max` | 对匹配行数做上下限检查 |
+| `sim_time_min` | 从 Report Summary 或 `$finish` 打印中取仿真结束时间 |
+| `uvm_info_min` + `id` | 指定消息 ID 的 UVM_INFO 数量下限 |
+| `reason` | 可选，失败时显示的说明 |
+
+写 `expect` 的目的是拦截虚假 pass：scoreboard 一笔没比、sequence 没启动、objection 提前撤销、checker 被关闭。每个 `ready` 及以上的 case 至少应有一条针对"确实比对过数据"的 expect。
+
+## 6. `tbspec.py`
+
+描述 UVM 环境，供 `solouvm new` 与 `solouvm uvm sync` 生成组件（U-02）。生成结果的结构与写法见 [uvm-style.md](uvm-style.md)。
+
+```python
+from solouvm.uvm import Env, Agent, Signal, Field
+
+ENVS = [
+    Env(
+        name="axi",
+        agents=[
+            Agent(
+                name="axi_mst",
+                active=True,
+                clock="aclk",
+                reset=("aresetn", "low"),
+                signals=[
+                    Signal("awaddr", 32, "out"),
+                    Signal("awlen", 8, "out"),
+                    Signal("awvalid", 1, "out"),
+                    Signal("awready", 1, "in"),
+                ],
+                fields=[
+                    Field("addr", 32),
+                    Field("len", 8, constraint="len inside {[0:255]}"),
+                    Field("burst", "axi_burst_e"),
+                ],
+                coverage=True,
+            ),
+            Agent(name="axi_slv_mon", active=False, like="axi_mst"),
+        ],
+        scoreboard=True,
+        ref_model=False,
+    ),
+]
+```
+
+| 类型 | 字段 | 说明 |
+|------|------|------|
+| `Env` | `name`、`agents`、`scoreboard`（默认 `True`）、`ref_model`、`coverage` | |
+| `Agent` | `name`、`active`、`clock`、`reset`（信号名, `"low"`/`"high"`）、`signals`、`fields`、`coverage`、`like` | `like` 复用另一个 agent 的信号与字段定义 |
+| `Signal` | `name`、`width`、`dir`（相对 DUT 的方向：`"out"` 为 tb 驱动，`"in"` 为 tb 采样） | 方向命名待细化 |
+| `Field` | `name`、`type`（位宽整数或类型名）、`rand`（默认 `True`）、`constraint` | |
+
+规则：
+
+- `name` 遵守 uvm-style.md §3 的命名规则，加载时校验；
+- 删除 `tbspec.py` 中的组件不会自动删除已生成的文件，`uvm sync` 只报告"多余的文件"；
+- 模板版本记录在生成文件头部，`uvm sync` 按当前 solouvm 内置（或项目覆盖）的模板版本重新生成。
