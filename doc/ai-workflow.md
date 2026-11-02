@@ -1,6 +1,6 @@
 # AI 协作流程
 
-solouvm 由人和 AI 共用同一套命令（N-20）。本文描述以 AI 为主力时的标准工作流：主 agent 写 case、提交回归；子 agent 独立分诊；主 agent 审查后决定下一步。需求编号见 [requirements.md](requirements.md) 的 AI 区。
+solouvm 由人和 AI 共用同一套命令（N-16）。本文描述以 AI 为主力时的标准工作流：主 agent 写 case、提交回归；子 agent 独立分诊；主 agent 审查后决定下一步。需求编号见 [requirements.md](requirements.md) 的 AI 区。
 
 > 状态：设计稿，尚无代码。本文不绑定具体的 agent 框架；附录给出 Claude Code 的示例配置。
 
@@ -37,16 +37,18 @@ solouvm 由人和 AI 共用同一套命令（N-20）。本文描述以 AI 为主
 
 ## 3. 主 agent 的输入：case 要写清楚
 
-子 agent 只能看到系统文档和 case 文档，判断质量取决于 case 写得是否清楚。`stage` 为 `ready` 及以上的 case，`validate` 要求下列字段齐全（AI-02）：
+子 agent 只能看到系统文档和 case 文档，判断质量取决于 case 写得是否清楚。新 case 默认 `stage="wip"`，`validate` 不强制；升到 `ready` 及以上时，`validate` 要求下列字段齐全（AI-02）：
 
 | 字段 | 回答的问题 | 示例 |
 |------|------------|------|
 | `intent` | 这个 case 验证什么功能点 | "验证 WRAP burst 跨 4K 边界时的地址回绕" |
 | `method` | 激励怎么产生、结果怎么检查 | "随机长度 2/4/8/16 的 WRAP 读写；scoreboard 逐笔比对；SVA 检查地址" |
-| `expect` | 通过时一定能观察到的现象，机械可查 | 至少比对 100 笔；仿真时间不短于 50us |
+| `expect` | 通过时一定能观察到的现象，机械可查 | `Expect(scoreboard="AXI_SCB", min=100)`；仿真时间不短于 50us |
 | `spec_refs` | 对应的规格章节 | `["AXI4 A3.4.1", "design_spec 5.2"]` |
 
-`expect` 由 judge 机械检查（J-18），专门拦截常见的虚假 pass：scoreboard 一笔没比、sequence 没启动、objection 提前撤销、checker 被关闭。子 agent 处理机械检查覆盖不到的语义部分。
+`expect` 由 judge 机械检查（J-18），专门拦截常见的虚假 pass：scoreboard 一笔没比、sequence 没启动、objection 提前撤销、checker 被关闭。它依赖 uvm-style.md §5.2 规定的打印格式，所以环境必须按规范生成。子 agent 处理机械检查覆盖不到的语义部分。
+
+负向测试的 `expect_fail` 应写明期望的错误（正则），否则任何失败都会被当成预期失败（J-20）。
 
 ## 4. 系统文档
 
@@ -68,11 +70,12 @@ solouvm 由人和 AI 共用同一套命令（N-20）。本文描述以 AI 为主
 
 | 结果 | 默认策略 |
 |------|----------|
-| 失败（fail / timeout / killed / xpass） | 全部分诊；**同一签名合并为一个任务**，附带全部相关 job |
-| 环境失败（error） | 不分诊，只在报告中列出 |
-| 机械检查报警的 pass（expect 不满足以外的弱信号，如仿真时间异常短） | 分诊 |
-| `wip` case 的 pass、本轮相对上一轮改过的 case 的 pass | 分诊，查虚假 pass |
-| `signoff` case 的 pass | 不分诊 |
+| 失败（fail / timeout / killed / xpass） | 全部分诊；**同一签名合并为一个任务**，可以跨多个 case，附带全部相关 job |
+| 未完成（incomplete）、环境失败（error） | 不分诊，只在报告中列出；需要时重跑 |
+| xfail（预期失败且原因相符） | 不分诊；原因不符的失败本来就是 fail，照常分诊 |
+| 机械检查报警的 pass（弱信号，如仿真时间异常短，M2） | 分诊 |
+| `wip` case 的 pass；`Case(...)` 定义或其 test 文件相对上一轮有改动的 case 的 pass | 分诊，查虚假 pass |
+| 其余 `ready` / `signoff` case 的 pass | 不分诊 |
 
 每个任务有稳定的 ID：`<run_id>/<序号>`，例如 `20261103-101500-a1b2/3`。
 
@@ -86,7 +89,9 @@ solouvm 由人和 AI 共用同一套命令（N-20）。本文描述以 AI 为主
 4. 本轮结果：状态、原因、首条错误、错误前后的日志片段、`expect` 的检查结果；
 5. 首条错误中 `file(line)` 指向的源码片段；
 6. 同签名的历史失败、这个 case 上次通过的轮次与之后的 git 提交；
-7. 可用的复现命令与波形查询示例。
+7. 可用的复现命令；本轮是否有带波形重跑的结果，以及波形查询示例。
+
+想让子 agent 能看波形，回归时设置 `regress.wave_on_fail = "per_signature"`（R-03），每个签名会有一个带波形的代表 job。注意：波形文本查询（AI-13）在 M4 才实现，此前子 agent 实际读不了波形。
 
 总长度有上限（默认约 2 万 token，可配置），超出部分给出路径与查询命令，不直接塞入。
 
@@ -101,16 +106,30 @@ solouvm 由人和 AI 共用同一套命令（N-20）。本文描述以 AI 为主
 
 ### 5.4 子 agent 的输出
 
-1. **bug**：结论为 `design_bug` 或 `tb_bug` 时，用 `solouvm bug add` 登记到对应 case，状态 `open`，带复现种子（M-14）。已有同签名的 open bug 时不重复登记，改为用 `note add` 追加一条调试记录。
-2. **调试文档**：`docs/debug/<case>/<run_id>-<task序号>.md`，入库。内容：现象、排查过程、关键证据、结论、建议的修复方向。由 `solouvm triage write --doc FILE` 校验格式后放入。
-3. **分诊记录**：`solouvm triage write` 在 case 中追加一条 `Triage` 记录，指向调试文档与 bug。
+1. **bug**：结论为 `design_bug` 或 `tb_bug` 时，用 `solouvm bug add <case> --job <job_id>` 登记，状态 `open`，复现种子与失败签名自动带上（M-03、M-14）。任务涉及多个 case 时，登记在失败最多的那个 case 下。已有同签名的未解决 bug 时不重复登记，改为用 `note add` 追加一条调试记录。
+2. **调试文档**：`docs/debug/<run_id>/<序号>.md`，入库。内容：现象、排查过程、关键证据、结论、建议的修复方向。由 `solouvm triage write --doc -` 从标准输入读入，校验格式后写入（AI-19）。
+3. **分诊记录**：`solouvm triage write` 在任务涉及的每个 case 中追加一条 `Triage` 记录，指向调试文档与 bug，并记下分诊时的机械结果（M-24）。
+
+子 agent 没有写文件的工具，所有正文都通过标准输入交给 solouvm，例如：
+
+```text
+solouvm --role triage triage write 20261103-101500-a1b2/1 --verdict design_bug --confidence high \
+    --summary "..." --evidence "log:812" --doc - <<'EOF'
+## 现象
+...
+EOF
+```
+
+### 5.5 并发
+
+多个子 agent 可以同时工作。写入 case 文件时，solouvm 持有 A 上的记录锁，bug 编号在锁内分配，不会互相覆盖或重号（M-14）。
 
 ## 6. 权限边界
 
 ### 6.1 原则
 
 - 子 agent **只能往下判**：可以把机械判定的 pass 判为 `false_pass`；不能把任何失败改判为通过（AI-08）。
-- 子 agent **只能追加，不能修改**：只能新增 bug、log、triage 记录与调试文档；不能改 case 的任何其他字段，包括 `checks`、`waivers`、`expect`、`expect_fail`、`stage`。否则它可以通过放宽条件让 case 变绿。
+- 子 agent **只能追加，不能修改**：只能新增 bug、调试记录、triage 记录与调试文档；唯一的例外是修改自己登记且尚未审查的 bug。不能改 case 的任何其他字段，包括 `checks`、`waivers`、`expect`、`expect_fail`、`stage`。否则它可以通过放宽条件让 case 变绿。
 - `false_pass` 必须经主 agent 审查接受后才改变最终状态；未审查前在报告中标为"待审查"。
 
 ### 6.2 solouvm 怎么保证
@@ -119,10 +138,10 @@ agent 能读写哪些文件由 agent 框架控制，solouvm 管不到。solouvm 
 
 | 机制 | 作用 |
 |------|------|
-| 记录写入命令（`bug add`、`note add`、`triage write`） | 唯一的合法写入路径；写入前校验、写入后重新加载验证，失败即回滚 |
+| 记录写入命令（`bug add`、`note add`、`triage write`） | 唯一的合法写入路径；持锁写入，写入前校验、写入后重新加载验证，失败即回滚 |
 | 全局参数 `--role triage` | 该角色下，除记录写入与只读命令外的所有命令直接拒绝，退出码 2 |
 | 写入审计 | 每条记录带 `author`（角色与 agent 标识）与时间 |
-| 子 agent 定义模板 | `solouvm init --agents` 生成框架所需的配置：工具白名单、角色变量、标准流程说明 |
+| 子 agent 定义模板 | `solouvm init --agents` 生成框架所需的配置：工具白名单、`--role triage` 参数、标准流程说明 |
 
 框架层面应把子 agent 的工具限制为：读文件、搜索、执行 `solouvm` 命令；不给通用的文件编辑工具。
 
@@ -143,9 +162,11 @@ solouvm triage review <task> --reject "日志 812 行的错误来自 monitor 采
 | `env_issue` | 状态改为 `error`，可重跑 |
 | `spec_unclear` / `unknown` | 主 agent 自行处理，必要时由人介入 |
 
-驳回时，子 agent 登记的 bug 自动标为 `wontfix` 并附驳回理由，调试文档保留（同样是有价值的记录）。
+驳回时，子 agent 登记的 bug 自动标为 `invalid`（不是问题）并附驳回理由，调试文档保留（同样是有价值的记录）。
 
 审查记录写入 `Triage` 记录的 `review` 字段。`solouvm triage status` 列出本轮所有任务及其审查状态，主 agent 以此确认没有遗漏。
+
+分诊结论会过期（AI-20）：主 agent 改了规则或 expect 后重新 `judge`，机械结果变化的任务标为"过期"，原结论不再生效，需要重新分诊。
 
 ## 8. 人的位置
 
@@ -169,6 +190,8 @@ solouvm --role triage bug add / note add / triage write 写入。
 完成后用一段话报告结论与置信度，然后结束。
 ```
 
-两层限制叠加生效：框架层面没有文件编辑工具，Bash 只允许以 `solouvm --role triage` 开头的命令；solouvm 层面在 triage 角色下拒绝记录写入与只读之外的一切命令。白名单的具体写法以所用框架版本的文档为准。
+两层限制叠加生效：框架层面没有文件编辑工具，Bash 只允许以 `solouvm --role triage` 开头的命令；solouvm 层面在 triage 角色下拒绝记录写入与只读之外的一切命令。正文用 heredoc 接在命令后面，不需要写文件。
+
+不确定：白名单的具体写法（包括带 heredoc 的命令能否匹配前缀规则）以所用框架版本的文档为准，生成模板时需实测。
 
 其他框架按同样的要点配置：只读工具 + 带角色参数的 `solouvm` 命令。

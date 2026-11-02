@@ -1,11 +1,11 @@
 # TODO
 
-实现进度。需求本身（内容、优先级、理由）见 [doc/requirements.md](doc/requirements.md)，里程碑划分见其 §25。
+实现进度。需求本身（内容、优先级、理由）见 [doc/requirements.md](doc/requirements.md)，里程碑划分见其 §25，不确定事项见其 §26。
 
 ## 文档
 
 - [x] README.md
-- [x] doc/requirements.md（含里程碑）
+- [x] doc/requirements.md（含里程碑、不确定事项）
 - [x] doc/architecture.md
 - [x] doc/config.md
 - [x] doc/cli.md
@@ -15,10 +15,9 @@
 - [x] doc/decisions.md
 - [x] doc/ai-workflow.md
 - [x] doc/uvm-style.md
-- [ ] 用户 review，修订
-- [ ] 调研：slang 参数与 UVM 解析（fast-compile.md §5）
-- [ ] 调研：波形文本导出工具（AI-13）
-- [ ] 调研：rich 及依赖的 vendor 方式与体积（D37）
+- [x] 第一轮自查评审，按评审意见修订（2026-11-03）
+- [ ] 用户最终 review：重点看 decisions.md 中"待确认"的 D41–D56
+- [ ] 逐项验证 requirements.md §26 的不确定事项（需要真实工具环境）
 
 ## 代码
 

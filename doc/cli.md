@@ -2,7 +2,7 @@
 
 本文列出 solouvm 全部命令、参数与退出码。人和 AI 使用同一套命令（N-16）：默认输出给人看，`--json` 给程序与 AI。命令行输出、错误信息一律为英文（N-15）；本文的说明用中文。
 
-> 状态：设计稿，尚无代码。
+> 状态：设计稿，尚无代码。命令标题中的（M2）等表示所属里程碑，未标注的属于 M1；里程碑划分见 requirements.md §25。
 
 ## 1. 约定
 
@@ -15,8 +15,8 @@ solouvm [全局参数] <命令> [命令参数]
 | 码 | 含义 |
 |----|------|
 | 0 | 成功；对回归类命令表示全部通过（含 xfail） |
-| 1 | 有测试失败：fail / timeout / killed / error / incomplete / xpass；`check` 发现代码错误 |
-| 2 | 配置、环境或编译错误；hook 抛出异常；选择条件为空 |
+| 1 | 有不算通过的结果：fail / timeout / killed / error / incomplete / xpass / false_pass；`check` 发现代码错误；`lint-style` 发现违规；`triage status` 有未审查的任务 |
+| 2 | 配置、环境或编译错误；选择条件为空；角色不允许；hook 抛出异常 |
 | 130 | 被 Ctrl-C 中断 |
 
 ### 1.2 全局参数
@@ -28,9 +28,10 @@ solouvm [全局参数] <命令> [命令参数]
 | `-c, --config PATH` | 配置文件或其所在目录；默认向上查找 `solouvm.conf.py` |
 | `-v` / `-vv` | `-v` 把仿真输出同时打到终端；`-vv` 再打印 solouvm 执行的每条外部命令（Z-07） |
 | `-q, --quiet` | 只输出错误与最终摘要 |
-| `--no-hooks` | 跳过全部 A 端 hook（W-03） |
+| `--no-hooks` | 跳过全部 A 端 hook（W-03，待定） |
 | `--provider NAME` | 临时指定 provider（H-01a） |
-| `--json` | 以 JSON 输出，结构见 §1.5（N-17） |
+| `--json` | 以 JSON 输出，结构见 §1.4（N-17） |
+| `--limit N` | 列表与日志的输出上限，`0` 表示不截断（N-19） |
 | `--role main\|triage` | 运行角色，默认 `main`；`triage` 下只允许只读命令与记录写入（AI-10） |
 | `--version` | 打印版本 |
 
@@ -43,13 +44,13 @@ solouvm [全局参数] <命令> [命令参数]
 | `--case PATTERN` | 按名字选，支持通配，可重复（T-09） |
 | `--tag TAG` | 只选带此 tag 的 case，可重复；多个 tag 之间为"或" |
 | `--exclude-tag TAG` | 排除带此 tag 的 case，可重复，优先于 `--tag` |
+| `--stage LIST` | 按开发阶段选，如 `ready,signoff`；默认 `wip,ready,signoff`（T-19、M-18） |
 | `--seed N` / `--seeds SPEC` | 覆盖种子；`SPEC` 如 `"1-5,42"` 或 `"random:10"` |
 | `--build MODE` | 只选使用该编译配置的 case |
-| `--shard I/N` | 稳定地把 job 分成 N 份，只取第 I 份（1 起计）（T-16） |
-| `--include-wip` | 筛选时也包含 `stage="wip"` 的 case（M-18） |
+| `--shard I/N` | 稳定地把 job 分成 N 份，只取第 I 份（1 起计）（T-16，M2） |
 | `--allow-empty` | 选择结果为空时返回 0 而不是 2（T-17） |
 
-选择顺序：先按 `stage` 过滤，再按 `--case`、`--tag`、`--exclude-tag`、`--build`，然后展开种子成 job，最后分片。
+选择顺序：先按 `--stage` 过滤，再按 `--case`、`--tag`、`--exclude-tag`、`--build`，然后展开种子成 job，最后分片。`--case` 选中 `planned` 的 case 时报错，选中 `deprecated` 的 case 时照跑并警告（config.md §5.1）。
 
 ### 1.4 机器可读输出
 
@@ -71,7 +72,9 @@ solouvm [全局参数] <命令> [命令参数]
 - `truncated`：输出被截断时给出省略数量与继续查看的命令（N-19），例如 `{"omitted": 1840, "more": "solouvm log burst__4417 --lines 200-400"}`；
 - `next`：建议的下一步命令，人类输出模式下以 `next:` 行打印。
 
-默认的人类输出同样遵守输出上限：列表超过 50 行、日志超过 200 行时截断并提示。`--limit N` 可调整，`--limit 0` 表示不截断。
+默认的人类输出同样遵守输出上限：列表超过 50 行、日志超过 200 行时截断并提示，用全局参数 `--limit` 调整。
+
+标准输出不是终端时（被 AI、管道、CI 读取），不输出颜色与控制字符；进度不做原地刷新，改为每完成一个 job 打印一行（N-22）。
 
 ### 1.5 角色与权限
 
@@ -80,7 +83,7 @@ solouvm [全局参数] <命令> [命令参数]
 | 类别 | 命令 |
 |------|------|
 | 只读 | `uvm diff`、`lint-style`、`list`、`files`、`config`、`validate`、`status`、`log`、`explain`、`wave`、`notes`、`history`、`progress`、`schema`、`help`、`triage packet`、`triage status` |
-| 记录写入 | `bug add`、`bug update`（只能改自己登记的 bug）、`note add`、`todo add`、`triage write` |
+| 记录写入 | `bug add`、`bug update`（只能改自己登记且尚未审查的 bug）、`note add`、`todo add`、`triage write` |
 
 其余命令（`gen`、`build`、`regress`、`rerun`、`stop`、`clean`、`triage plan`、`triage review`、`todo done` 等）一律拒绝，错误码 `ROLE_DENIED`，退出码 2。
 
@@ -110,13 +113,12 @@ solouvm [全局参数] <命令> [命令参数]
 | `--agents FRAMEWORK` | 同时生成子 agent 定义模板，如 `claude`（AI-12） |
 | `--bare` | 只生成配置文件，不生成示例环境 |
 
-### `solouvm config`
+### `solouvm config`（M2）
 
 打印合并后的最终配置，每个值标注来源：`default` / `conf` / `local` / `cli`（C-08）。
 
 | 参数 | 说明 |
 |------|------|
-| `--json` | 以 JSON 输出 |
 | `KEY` | 只看某个键，如 `solouvm config regress.jobs` |
 
 ### `solouvm files`
@@ -129,15 +131,16 @@ solouvm [全局参数] <命令> [命令参数]
 
 ```text
 case.py:42: error: Case 'burst' is stage 'ready' but has no 'expect' (AI-02)
+case.py:57: warning: Case 'neg_len0' uses expect_fail=True; name the expected error (J-20)
 cases/axi_wrap.py:18: error: Bug id 3 duplicated in case 'axi_wrap'
 solouvm.conf.py:12: error: unknown key 'regres' in CFG; did you mean 'regress'?
 
-3 errors
+3 errors, 1 warning
 ```
 
 有错误时退出码 2。改完 case 后先跑它，是主 agent 的标准动作。
 
-### `solouvm schema [NAME]`
+### `solouvm schema [NAME]`（M2）
 
 打印 JSON Schema：`config`、`case`、`records`、`plan`、`results`、`facts`、`packet`、`output`（Z-11）。不带参数时列出可用名称。
 
@@ -153,11 +156,7 @@ smoke__1        smoke   1     default                ready
 2 jobs from 2 cases
 ```
 
-| 参数 | 说明 |
-|------|------|
-| `--json` | 以 JSON 输出 |
-
-### `solouvm doctor`
+### `solouvm doctor`（M2）
 
 检查环境并逐项给出结论与修复建议（Z-02）：
 
@@ -178,11 +177,11 @@ smoke__1        smoke   1     default                ready
 |------|------|----------|
 | `agent` | interface、package、txn、cfg、drv、mon、sqr、cov、agent、base_seq | 若 `tbspec.py` 中已有同名 agent，按其描述生成；否则生成带占位信号的骨架 |
 | `env` | package、env_cfg、scb、vsqr、env、base_vseq，以及 test package 与 base_test | `--agents a,b` 或使用 `tbspec.py` 中的描述 |
-| `test` | `<env>_<name>_test.sv`，并在 `case.py`（或 `cases/`）中登记一个 `stage="wip"` 的 case，带默认 `expect`（U-09） | `--env E` |
+| `test` | `<env>_<name>_test.sv`，并在 `case.py`（或 `cases/`）中登记一个 `stage="wip"` 的 case，带默认的 `Expect(scoreboard="<ENV>_SCB", min=1)`（U-09） | `--env E` |
 | `seq` | `<agent>_<name>_seq.sv` | `--agent A` |
 | `vseq` | `<env>_<name>_vseq.sv` | `--env E` |
 
-已存在的文件不覆盖，报错退出；需要按新模板更新已有文件时用 `uvm sync`。
+已存在的文件不覆盖，报错退出（`UVMGEN_EXISTS`）；需要按新模板更新已有文件时用 `uvm sync`。新文件会登记到所属 package 的 `<pkg>_files.svh`（U-11），`filelist.py` 不用改（U-07）。
 
 ### `solouvm uvm sync`（M2）
 
@@ -216,8 +215,9 @@ gen → push → 在 B 上编译。默认编译所选 case 用到的全部 build
 | 参数 | 说明 |
 |------|------|
 | `--build MODE` | 只编译指定的 build mode，可重复 |
+| `--rebuild` | 忽略已有的成功标记，强制重新编译（产物写入新目录） |
 
-编译失败时打印编译日志中第一个错误的位置与上下文，退出码 2（D-03）。
+编译键相同且已编译成功时直接复用（D-06）。编译失败时打印编译日志中第一个错误的位置与上下文，退出码 2（D-03）。
 
 ### `solouvm run` / `solouvm regress`
 
@@ -228,13 +228,13 @@ gen → push → build → run → judge → report。两者流程相同，区�
 | `regress` | 选择全部可回归的 case（见 config.md §5.1 的 stage 表） |
 | `run` | 报错，要求至少给出 `--case` 或 `--tag`，避免误跑全量 |
 
-默认阻塞，期间每隔几秒刷新一行进度（H-13）：
+默认阻塞，期间显示进度（H-13）；输出不是终端时改为每完成一个 job 打印一行，`--json` 时输出 JSON Lines 事件：
 
 ```text
 [12:03:41] 37/120 done  pass 33  fail 3  error 1  running 16  queued 67  eta 41m
 ```
 
-按 Ctrl-C：终止 B 上本轮全部 job，对已完成的 job 判定并输出报告，退出码 130（Q3）。
+按 Ctrl-C：终止 B 上本轮全部 job，对已完成的 job 判定并输出报告，退出码 130（Q3）。某个编译模式编译失败时，依赖它的 job 不执行、记为 `error`，其他模式的 job 照常执行，最终退出码 2（D-07）。
 
 ### `solouvm rerun`
 
@@ -245,12 +245,12 @@ gen → push → build → run → judge → report。两者流程相同，区�
 | `--failed` | 重跑全部失败 job（默认） |
 | `--status S` | 只重跑指定状态，如 `--status timeout`，可重复 |
 | `--run RUN_ID` | 基于哪一轮，默认 `latest` |
-| `--note CASE#ID` | 用某个 bug 记录的种子重跑该 case（M-12） |
+| `--note CASE#ID` | 用某个 bug 记录的种子重跑该 case（M-12，M2） |
 | `--wave` | 打开波形 |
 
 `rerun` 产生新的 run_id，结果不覆盖原轮次。
 
-### `solouvm check`
+### `solouvm check`（M3）
 
 fast compile：slang 检查 → fake_top 编译（→ RTL 增量编译，P2）。详见 [fast-compile.md](fast-compile.md)。
 
@@ -265,7 +265,7 @@ fast compile：slang 检查 → fake_top 编译（→ RTL 增量编译，P2）�
 
 ## 5. 运行中与运行后
 
-### `solouvm status`
+### `solouvm status`（M2）
 
 查看某一轮的进度与已完成 job 的初步判定（Z-04）。可以在另一个终端执行，也可以用于 `--detach` 之后。
 
@@ -307,7 +307,7 @@ fast compile：slang 检查 → fake_top 编译（→ RTL 增量编译，P2）�
 | `--run RUN_ID` | 默认 `latest`，输出中写明实际 run_id |
 | `--try N` | 默认最后一次尝试 |
 
-### `solouvm wave JOB_ID`
+### `solouvm wave JOB_ID`（M4）
 
 以文本表格返回波形中指定信号在一段时间内的值（AI-13）。只读查询，不打开 GUI。
 
@@ -322,15 +322,15 @@ solouvm wave burst__4417 --signals tb_top.dut.araddr,tb_top.dut.arvalid --from 1
 | `--changes` | 只输出值变化的时刻（默认） |
 | `--limit N` | 最多输出多少行，默认 200 |
 
-在 B 上调用后端定义的导出工具（如 Verdi 的 `fsdbreport`），具体命令待调研；没有波形时提示用 `rerun --wave` 生成。
+在 B 上调用后端定义的导出工具（如 Verdi 的 `fsdbreport`）。不确定：具体用哪个工具、命令怎么写，待调研（AI-13）。没有波形时提示用 `rerun --wave` 生成。
 
-### `solouvm stop`
+### `solouvm stop`（M2）
 
 终止某一轮在 B 上的全部 job（Q3）；终止后自动执行一次 `judge`。
 
 | 参数 | 说明 |
 |------|------|
-| `--run RUN_ID` | 默认 `latest` |
+| `--run RUN_ID` | 默认为唯一一个仍在进行的轮次；有多个进行中的轮次时必须指定。输出中写明实际终止的 run_id |
 
 ### `solouvm judge`
 
@@ -340,8 +340,9 @@ solouvm wave burst__4417 --signals tb_top.dut.araddr,tb_top.dut.arvalid --from 1
 |------|------|
 | `--run RUN_ID` | 默认 `latest` |
 | `--allow-missing` | 未运行的 job 记为 skip 而不是 error（J-09） |
+| `--partial` | 回归仍在进行时，只判已完成的 job，结果标为部分结果（J-23，M2）；不加时报 `RUN_ACTIVE` |
 
-### `solouvm report`
+### `solouvm report`（M4）
 
 基于已有的 `results.json` 生成其他格式，不重新判定。
 
@@ -352,7 +353,7 @@ solouvm wave burst__4417 --signals tb_top.dut.araddr,tb_top.dut.arvalid --from 1
 | `--compare RUN_ID` | 与另一轮对比：新增失败、新修复、仍失败（K-06） |
 | `-o PATH` | 输出位置 |
 
-### `solouvm history`
+### `solouvm history`（M2）
 
 | 用法 | 说明 |
 |------|------|
@@ -390,25 +391,29 @@ burst       todo  -       wp       -     补 narrow transfer 场景（due 2026-1
 登记 bug，写回 case 源文件（M-14）。
 
 ```text
-solouvm bug add burst --title "WRAP 跨 4K 边界地址回绕错误" --seed 4417 \
-    --owner hw-zhao --body-file /tmp/burst-bug.md
+solouvm bug add burst --title "WRAP 跨 4K 边界地址回绕错误" --job burst__4417 \
+    --owner hw-zhao --body - <<'EOF'
+第二拍 addr_q 回绕成 0，见 log 812 行。
+EOF
 ```
 
 | 参数 | 说明 |
 |------|------|
 | `--title` | 必填 |
-| `--seed` / `--run` / `--job` | 复现信息；`--job` 时自动取其种子 |
-| `--owner` / `--link` / `--body` / `--body-file` | |
-| `--id N` | 不写时取下一个可用编号 |
+| `--seed` / `--run` / `--job` | 复现信息；给 `--job` 时自动取其种子与失败签名 |
+| `--owner` / `--link` | |
+| `--body TEXT` | 正文；`--body -` 从标准输入读（AI-19） |
+| `--author NAME` | 写入者标识，例如子 agent 的编号；不写时为角色名 |
+| `--id N` | 不写时取下一个可用编号（在记录锁内分配，M-14） |
 
-输出新 bug 的完整 ID，例如 `burst#3`。`found` 取当天日期，`status` 为 `open`，`author` 按角色自动填写。
+输出新 bug 的完整 ID，例如 `burst#3`。`found` 取当天日期，`status` 为 `open`。
 
 ### `solouvm bug update CASE#ID`
 
 | 参数 | 说明 |
 |------|------|
 | `--status S` | 按 config.md §5.2 的状态约束，自动补 `fixed` / `verified` 日期 |
-| `--owner` / `--link` / `--append-body TEXT` | |
+| `--owner` / `--link` / `--append-body TEXT` | `--append-body -` 从标准输入读 |
 
 triage 角色只能修改自己登记、且尚未被审查的 bug。
 
@@ -416,7 +421,7 @@ triage 角色只能修改自己登记、且尚未被审查的 bug。
 
 `note add` 追加调试记录（`Log`，默认）或一般备注（`--kind note`）；`todo add` 追加 todo；`todo done` 标记完成（仅限 main 角色）。命名上与查看日志的 `solouvm log JOB_ID` 区分开。
 
-写入流程统一：定位 `notes=[...]` → 插入 → 重新加载并校验 → 失败则恢复原文件并报错。被写入的文件有未保存的冲突（例如同时被编辑器修改）时拒绝写入。
+写入流程统一：获取记录锁 → 定位 `notes=[...]` → 插入 → 重新加载并校验 → 失败则恢复原文件并报错。文件在读与写之间被改动（例如编辑器同时保存）时放弃写入（`RECORD_CONFLICT`）。正文参数都支持 `-` 从标准输入读。
 
 ### `solouvm triage plan`
 
@@ -424,7 +429,7 @@ triage 角色只能修改自己登记、且尚未被审查的 bug。
 
 ```text
 TASK                         KIND   JOBS  CASE        SIGNATURE / REASON
-20261103-101500-a1b2/1       fail   3     burst       3fa9c2e1 UVM_ERROR ... [SCB] addr <HEX> ...
+20261103-101500-a1b2/1       fail   3     burst       3fa9c2e1 UVM_ERROR ... [AXI_SCB] mismatch: expect <HEX> ...
 20261103-101500-a1b2/2       pass   1     axi_wrap    stage=wip
 20261103-101500-a1b2/3       pass   1     smoke       weak signal: sim time 0ns
 
@@ -456,7 +461,7 @@ solouvm --role triage triage write 20261103-101500-a1b2/1 \
     --verdict design_bug --confidence high \
     --summary "WRAP 地址计算未对 4K 边界取模，addr_q 第二拍回绕成 0" \
     --evidence "log:812" --evidence "rtl/axi_slv.sv:120" --evidence "wave:1234ns tb_top.dut.addr_q" \
-    --bug burst#3 --doc /tmp/triage-1.md
+    --bug burst#3 --doc - < triage.md
 ```
 
 | 参数 | 说明 |
@@ -466,9 +471,19 @@ solouvm --role triage triage write 20261103-101500-a1b2/1 \
 | `--summary` | 不超过 200 字 |
 | `--evidence` | 至少一条；格式 `log:行号`、`文件:行号`、`wave:时间 信号` |
 | `--bug` | 关联的 bug，可重复 |
-| `--doc FILE` | 调试文档；校验必需章节后复制到 `docs/debug/<case>/<run_id>-<序号>.md` |
+| `--doc FILE` | 调试文档；`--doc -` 从标准输入读（AI-19）。校验必需章节后写到 `docs/debug/<run_id>/<序号>.md` |
+| `--author NAME` | 写入者标识，不写时为角色名 |
 
-约束：结论必须与任务类型相容——pass 任务只能是 `real_pass` / `false_pass`；失败任务不能是 `real_pass`（AI-08）。同一任务重复写入时，覆盖未审查的上一次结论。
+约束：结论必须与任务类型相容——pass 任务只能是 `real_pass` / `false_pass`；失败任务不能是 `real_pass`（AI-08）。同一任务重复写入时，覆盖未审查的上一次结论。任务涉及多个 case 时，Triage 记录写到每个 case（AI-07）。
+
+子 agent 没有写文件的工具，可以用 heredoc 把正文直接接在命令后面：
+
+```text
+solouvm --role triage triage write <task> --verdict ... --doc - <<'EOF'
+## 现象
+...
+EOF
+```
 
 ### `solouvm triage review TASK`
 
@@ -477,13 +492,13 @@ solouvm --role triage triage write 20261103-101500-a1b2/1 \
 | 参数 | 说明 |
 |------|------|
 | `--accept` | 接受结论，按 ai-workflow.md §7 更新最终状态 |
-| `--reject REASON` | 驳回，理由必填；子 agent 登记的 bug 自动改为 `wontfix` |
+| `--reject REASON` | 驳回，理由必填；子 agent 登记的 bug 自动改为 `invalid` |
 
 ### `solouvm triage status`
 
-列出某轮全部分诊任务、结论、置信度、审查状态，未审查的排在前面（AI-11）。存在未审查任务时退出码 1，便于脚本判断"本轮是否已全部审完"。
+列出某轮全部分诊任务、结论、置信度、审查状态，未审查与已过期的排在前面（AI-11、AI-20）。存在未审查任务时退出码 1，便于脚本判断"本轮是否已全部审完"。
 
-### `solouvm doc`
+### `solouvm doc`（M4）
 
 导出 markdown（M-08 ~ M-10、M-21）。
 
@@ -495,20 +510,20 @@ solouvm --role triage triage write 20261103-101500-a1b2/1 \
 
 导出内容：`index.md`（进度总览、未解决 bug 汇总、case 列表）+ 每个 case 一个 `<case>.md`。目录中由 solouvm 生成、但本次不再产生的旧文件会被删除；非 solouvm 生成的文件不动。
 
-### `solouvm progress`
+### `solouvm progress`（M4）
 
 终端版进度总览（M-20）：各 stage 的 case 数、最近一轮通过率、按 owner 统计的未解决 bug 与 todo、逾期 todo、状态不一致提示（M-22）。
 
 ## 7. 其他
 
-### `solouvm cov`
+### `solouvm cov`（M4）
 
 | 用法 | 说明 |
 |------|------|
 | `solouvm cov merge [--run RUN_ID]` | 在 B 上合并该轮通过 job 的覆盖率库（V-03） |
 | `solouvm cov report [--run RUN_ID]` | 在 B 上生成报告，A 只取回汇总数字（V-04） |
 
-### `solouvm bisect CASE`（P2）
+### `solouvm bisect CASE`（待定）
 
 在两个 git 提交之间二分，找出引入失败的提交（AI-17）。
 
@@ -521,22 +536,29 @@ solouvm --role triage triage write 20261103-101500-a1b2/1 \
 
 | 参数 | 说明 |
 |------|------|
-| 无参数 | 删除 A 与 B 上的 `.solouvm/runs/` 中超出保留策略的轮次 |
+| 无参数 | 删除 A 与 B 上超出保留策略的轮次，以及不再被任何保留轮次引用的编译目录 |
 | `--run RUN_ID` | 只删除指定轮次；破坏性操作不接受 `latest` |
 | `--all` | 删除整个 `.solouvm/`（A 与 B），保留用户文件 |
-| `--locks` | 清除残留的编译锁（见 architecture.md §12） |
+| `--locks` | 清除残留的编译锁（D23） |
 | `--local-only` | 只清理 A |
+
+### `solouvm help TOPIC`（M4）
+
+输出内置的离线文档（Z-12），内容与 `doc/` 一致，例如 `solouvm help verdict`。不带参数时列出主题。
 
 ## 8. 手动模式
 
-不经 solouvm 执行时，生成物可以直接用 `make`（N-03）：
+不经 solouvm 执行时，生成物可以直接用 `make`（N-03）。手动入口 `.solouvm/Makefile` 指向最近一次 `gen` 的轮次（`latest`）：
 
 ```bash
-solouvm gen --tag nightly          # A
+solouvm gen --tag nightly                     # A
 # 把项目同步到 B，在 B 的项目根：
 make build
-make -j16 regress                   # 或 make run/burst__4417
-make WAVE=1 run/burst__4417         # 带波形
+make -j16 regress                             # 或 make run/burst__4417
+make TRY=r1 WAVE=1 run/burst__4417            # 带波形复现，写到新目录，不覆盖原始结果
+make -f .solouvm/runs/<run_id>/run.mk TRY=r2 run/burst__4417   # 复现指定轮次
 # 回到 A（结果文件需能被 A 读到，例如共享盘，或配置了 provider）：
 solouvm judge
 ```
+
+编译失败时 `make build` 返回非 0，`make build && make regress` 会在编译失败处停下（D-07）。

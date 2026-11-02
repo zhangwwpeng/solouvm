@@ -12,18 +12,18 @@ SystemVerilog / UVM 仿真回归的 Python Runner。
 
 ```text
   A：控制机（装 solouvm）                          B：执行机（不装 solouvm）
- ┌────────────────────────────────┐              ┌──────────────────────────────┐
- │ solouvm.conf.py / filelist.py  │              │                              │
- │ case.py                        │              │                              │
- │        │ gen                   │    push      │  .solouvm/Makefile           │
- │        ▼                       │ ───────────▶ │  .solouvm/bin/run_job.sh     │
- │ Makefile + run_job.sh + plan   │              │  filelist*.f + 源码          │
- │                                │    run       │        │ make                │
- │                                │ ───────────▶ │        ▼                     │
- │                                │              │  out/<job>/sim.log           │
- │ judge：判定 + 汇总 + 报告      │ ◀─────────── │  out/<job>/事实文件          │
- │ results.json / JUnit / 终端    │    read      │  波形、覆盖率库（留在 B）    │
- └────────────────────────────────┘              └──────────────────────────────┘
+ ┌────────────────────────────────┐              ┌───────────────────────────────────┐
+ │ solouvm.conf.py / filelist.py  │              │                                   │
+ │ case.py / tbspec.py            │              │                                   │
+ │        │ gen                   │    push      │  .solouvm/gen/bin/run_job.sh      │
+ │        ▼                       │ ───────────▶ │  .solouvm/runs/<run_id>/run.mk    │
+ │ run.mk、脚本、文件清单、plan   │              │  文件清单 + 源码                  │
+ │                                │    run       │        │ make                     │
+ │                                │ ───────────▶ │        ▼                          │
+ │                                │              │  runs/<run_id>/<job>/try<N>/      │
+ │ judge：判定 + 汇总 + 报告      │ ◀─────────── │    sim.log  job.facts（事实）     │
+ │ results.json / JUnit / 终端    │    read      │  波形、覆盖率库（留在 B）         │
+ └────────────────────────────────┘              └───────────────────────────────────┘
 ```
 
 四条分工：
@@ -37,7 +37,7 @@ SystemVerilog / UVM 仿真回归的 Python Runner。
 
 | 插件 | 职责 | 实现 |
 |------|------|------|
-| provider | 在哪台机器、用什么方式执行 | `local`、`ssh`、`lsf`，可叠加，如 `ssh → lsf` |
+| provider | 在哪台机器、用什么方式执行（实现上分为 transport 与 launcher） | `local`、`ssh`、`lsf`，可叠加，如 `ssh → lsf` |
 | sync | 代码和生成物怎么到 B | `none`（共享盘）、`rsync`、`git` |
 
 ## 2. 人与 AI 协作
@@ -60,7 +60,7 @@ solouvm 由人和 AI 共用同一套命令，所有命令都支持 `--json`。�
 - **生成物可以独立使用**：生成的 `Makefile` 拿到任何一台有 `make` 的机器上都能跑，不依赖 solouvm。
 - **只用相对路径**：项目目录可以搬到另一台机器、另一个路径下直接使用。
 - **Linux 与 macOS 都支持**：平台差异在生成的脚本里于运行时处理。例如超时依次尝试 `timeout`、`gtimeout`、内置 bash 实现。
-- **判定可预期**：规则固定、按优先级执行。挂死、被信号杀死、日志被截断、读到上一轮的残留结果，都不会被误判为 pass。
+- **判定可预期**：规则固定、按优先级执行。挂死、被信号杀死、日志被截断、读到上一轮的残留结果、编译失败后拿旧产物跑，都不会被误判为 pass。
 - **出错就停，并说清楚原因**：不吞异常，不静默降级，报错时附带下一步建议。
 
 ## 4. 使用示意
@@ -74,7 +74,7 @@ CFG = {
     "project": "myproj",
     "simulator": "vcs",
     "top": "tb_top",
-    "regress": {"seeds": 3, "jobs": 16},
+    "regress": {"seeds": "random:3", "jobs": 16},
     "run": {"timeout": "30m"},
     "checks": {"max_uvm_error": 0, "fail_regex": ["TEST FAILED"]},
     "providers": {                     # 团队共享的命名 provider，入库
@@ -104,11 +104,19 @@ LOCAL = {
 
 ```python
 FILES = {
-    "rtl": ["rtl/**/*.sv", "-f ip/vendor_ip.f"],   # 设计代码，可导入已有 .f
-    "tb":  ["tb/pkg/*.sv", "tb/if/*.sv"],          # UVM 包、agent、interface
-    "top": ["tb/tb_top.sv", "tb/binds.sv"],        # 顶层、bind、DUT 层次引用
+    "rtl": ["rtl/**/*.sv", "-f ip/vendor_ip.f"],              # 设计代码，可导入已有 .f
+    "tb": [                                                   # UVM 包、agent、interface
+        "+incdir+verif",
+        "verif/agents/*/*_if.sv",
+        "verif/agents/*/*_pkg.sv",
+        "verif/envs/*/*_env_pkg.sv",
+        "verif/tests/*/*_test_pkg.sv",
+    ],
+    "top": ["verif/tb/tb_top.sv", "verif/tb/binds.sv"],       # 顶层、bind、DUT 层次引用
 }
 ```
+
+按这个布局（见 [doc/uvm-style.md](doc/uvm-style.md)），新增 agent、env、test 后不用改 `filelist.py`。
 
 `case.py`：
 
@@ -116,9 +124,10 @@ FILES = {
 from solouvm import Case
 
 CASES = [
-    Case(name="smoke", uvm_test="smoke_test"),
-    Case(name="burst", uvm_test="burst_test", params={"NUM": 32}, tags=("nightly",)),
-    Case(name="known_bug", uvm_test="burst_test", expect_fail=True),
+    Case(name="smoke", uvm_test="axi_smoke_test"),                      # 新 case 默认 stage="wip"
+    Case(name="burst", uvm_test="axi_burst_test", params={"NUM": 32}, tags=("nightly",)),
+    Case(name="len0", uvm_test="axi_len0_test",
+         expect_fail=r"\[AXI_SLV_MON\] illegal length 0"),              # 负向测试，写明期望的错误
 ]
 ```
 
@@ -127,12 +136,13 @@ case 本身就是文档、进度表和 bug 登记表：说明、负责人、开�
 ```python
 Case(
     name="burst",
-    uvm_test="burst_test",
+    uvm_test="axi_burst_test",
     owner="wp",
-    stage="wip",                    # planned / wip / ready / signoff
+    stage="ready",                  # planned / wip / ready / signoff；ready 起必须写全验收信息
     intent="验证 WRAP burst 跨 4K 边界时的地址回绕",
     method="随机 WRAP 读写；scoreboard 逐笔比对，SVA 检查地址",
-    expect=[Expect(regex=r"\[SCB\] compared (\d+)", min=100)],   # 机械拦截虚假 pass
+    spec_refs=["AXI4 A3.4.1"],
+    expect=[Expect(scoreboard="AXI_SCB", min=100)],              # 机械拦截虚假 pass
     doc="验证 AXI burst：INCR / WRAP / FIXED，长度 1–256。",
     notes=[
         Bug(id=1, title="WRAP 跨 4K 边界时地址回绕错误", status="open", seed=4417, found="2026-11-02"),
@@ -180,7 +190,7 @@ solouvm judge
 | `notes` | 跨所有 case 查询记录，默认列出全部未解决的 bug 与 todo |
 | `doc` | 把每个 case 的说明与记录导出为 markdown，附总索引 |
 | `progress` | 验证进度总览：各阶段 case 数、通过率、按 owner 统计的未解决 bug 与 todo |
-| `init` / `doctor` | 生成最小项目 / 检查控制机与执行机的环境 |
+| `doctor` | 检查控制机与执行机的环境 |
 | `status` / `log` / `stop` | 查看进行中的回归 / 读取执行机上的日志 / 终止本轮回归 |
 | `validate` | 只校验配置、case、记录，不生成任何文件 |
 | `explain` | 一次给出排查一个 job 所需的全部信息 |
@@ -188,6 +198,8 @@ solouvm judge
 | `bug add / update`、`note add`、`todo add / done` | 经命令行写入 case 记录 |
 | `wave` | 以文本方式查询波形中的信号值 |
 | `clean` | 清理生成物与运行目录 |
+
+以上是主要命令，完整列表、参数与里程碑见 [doc/cli.md](doc/cli.md)。
 
 退出码：0 全部通过；1 有测试失败；2 配置、环境或编译错误；130 被中断。
 
@@ -198,7 +210,7 @@ solouvm judge
 - 不把波形、覆盖率库回传到控制机。
 - 不管交互式调试：Verdi 等 GUI 在执行机上自行使用；只提供只读的文本化波形查询。
 - 不做 IP 依赖管理：交给 FuseSoC / Bender，再导入它们输出的 `.f`。
-- 不做 lint、formal、综合流程。
+- 不做 RTL lint、formal、综合流程（`lint-style` 只检查 UVM 环境是否符合风格规范）。
 
 ## 7. 文档
 
