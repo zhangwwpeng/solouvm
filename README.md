@@ -1,219 +1,199 @@
 # solouvm
 
-面向 SystemVerilog / UVM 验证的 **Python Runner**：用 Python 声明文件与 case，生成 `filelist.f` / `plan.json` / `Makefile`，执行仿真、判定结果、汇总报告。
+SystemVerilog / UVM 仿真回归的 Python Runner。
 
-**Python 是唯一配置语言，运行时零第三方依赖。** UVM 验证框架（目录骨架 / 模板）生成在规划中，见 [§9 路线图](#9-状态与路线图)。
+> **状态：设计阶段，尚无可用代码。** 本文描述的是目标形态，需求以 [doc/requirements.md](doc/requirements.md) 为准。
 
-```bash
-solouvm gen       # 收集文件与 case，生成 filelist.f / plan.json / Makefile（不编译、不执行）
-solouvm build     # gen + 编译
-solouvm regress   # gen + 编译 + 跑全部 case + 汇总
-solouvm end       # 只汇总（幂等，可反复跑）
+你在控制机上用 Python 写三个文件：项目配置、编译文件清单、case 列表。solouvm 生成一套只依赖 `make` 和 `bash` 的编译与运行脚本，送到执行机上跑仿真，再把结果读回控制机判定、汇总，最后给出一份报告和一个确定的退出码。
+
+控制机和执行机可以是同一台，也可以是笔记本加远端服务器、集群提交节点加 LSF。
+
+## 1. 核心思路
+
+```text
+  A：控制机（装 solouvm）                          B：执行机（不装 solouvm）
+ ┌────────────────────────────────┐              ┌──────────────────────────────┐
+ │ solouvm.conf.py / filelist.py  │              │                              │
+ │ case.py                        │              │                              │
+ │        │ gen                   │    push      │  .solouvm/Makefile           │
+ │        ▼                       │ ───────────▶ │  .solouvm/bin/run_job.sh     │
+ │ Makefile + run_job.sh + plan   │              │  filelist*.f + 源码          │
+ │                                │    run       │        │ make                │
+ │                                │ ───────────▶ │        ▼                     │
+ │                                │              │  out/<job>/sim.log           │
+ │ judge：判定 + 汇总 + 报告      │ ◀─────────── │  out/<job>/事实文件          │
+ │ results.json / JUnit / 终端    │    read      │  波形、覆盖率库（留在 B）    │
+ └────────────────────────────────┘              └──────────────────────────────┘
 ```
 
-上手见 [doc/getting-started.md](doc/getting-started.md)，可直接跑通的示例见 [examples/demo](examples/demo)（内置假仿真器，不需要 EDA 工具）。
+四条分工：
 
-## 1. 定位：做什么，不做什么
+1. **A 负责想，B 负责跑。** 收集、生成、判定、报告都在 A 上；B 只编译、执行，并记录事实。
+2. **B 上什么都不用装。** 只需要 `make`、`bash`、POSIX 工具和仿真器，不需要 Python，也不需要 solouvm。
+3. **B 只记录事实，不下结论。** 每个 job 结束时写下退出码、信号、是否超时、耗时。pass / fail 由 A 读日志后判定，所以改了判定规则不用重跑仿真。
+4. **大文件不搬家。** 波形和覆盖率库永远留在 B，A 只流式读取日志和事实文件。
 
-| 做                                                       | 不做                                     |
-|----------------------------------------------------------|------------------------------------------|
-| 从 Python 声明收集编译文件与 case                        | 解析 YAML / JSON / TOML 配置             |
-| 生成可独立使用的 `filelist.f` 与 `Makefile`              | 任务提交、license 排队、调度器适配       |
-| 单 case 执行：超时、信号、日志重定向、retry、判定        | 替代仿真器自身的功能（编译选项、波形等） |
-| 聚合结果、给出确定的退出码                               | 读原始日志做聚合（聚合只读 `status.json`）|
-| 每个阶段的 `pre` / `post` hook                           |                                          |
+"怎么到 B、怎么在 B 上跑"由两类可替换的插件负责：
+
+| 插件 | 职责 | 实现 |
+|------|------|------|
+| provider | 在哪台机器、用什么方式执行 | `local`、`ssh`、`lsf`，可叠加，如 `ssh → lsf` |
+| sync | 代码和生成物怎么到 B | `none`（共享盘）、`rsync`、`git` |
 
 ## 2. 设计原则
 
-- **Python 是第一公民**：配置就是 Python 模块，只认 Python。
-- **零第三方依赖**：运行时只用标准库；`pytest` / `ruff` 仅用于本仓库自测。
-- **声明式收集**：`filelist.py` 给出 `list`，`case.py` 给出 `list[Case]`，收集与处理由 Runner 负责。
-- **生成优先，执行可选**：生成物（`Makefile`）脱离 solouvm 也能用；托管执行只是便利层。
-- **判定贴着进程**：谁起进程谁判定，聚合只收账（见 §3.2）。
-- **环境无关**：契约文件只存相对路径，项目可整体搬移；不要求把 solouvm 安装为包。
-- **可扩展**：每个阶段提供 `pre` / `post` hook，hook 失败即中止，不静默降级。
+- **Python 是唯一的配置语言**：配置就是 Python 模块，不解析 YAML / JSON / TOML。
+- **A 上零第三方依赖**：只用 Python 标准库，要求 Python >= 3.10。
+- **生成物可以独立使用**：生成的 `Makefile` 拿到任何一台有 `make` 的机器上都能跑，不依赖 solouvm。
+- **只用相对路径**：项目目录可以搬到另一台机器、另一个路径下直接使用。
+- **Linux 与 macOS 都支持**：平台差异在生成的脚本里于运行时处理。例如超时依次尝试 `timeout`、`gtimeout`、内置 bash 实现。
+- **判定可预期**：规则固定、按优先级执行。挂死、被信号杀死、日志被截断、读到上一轮的残留结果，都不会被误判为 pass。
+- **出错就停，并说清楚原因**：不吞异常，不静默降级，报错时附带下一步建议。
 
-## 3. 核心模型
+## 3. 使用示意
 
-### 3.1 流程阶段
+以下是目标形态的示例，细节可能随设计调整。
 
-```text
-main ─ com ─ run ─ exec ─ end
- │      │     │     │      └─ 聚合 status.json -> results.json / results.txt + 退出码
- │      │     │     └──────── 每个 case 一次 _exec：起进程、超时、判定、写 status.json
- │      │     └────────────── 收集 case × seed，生成 plan.json 与运行目标
- │      └──────────────────── 收集文件，生成 filelist.f 与编译目标
- └─────────────────────────── 解析参数、加载配置、检查合法性
-```
-
-| 阶段 | 产物 / 职责                                   | 实现                           | 有 hook |
-|------|-----------------------------------------------|--------------------------------|---------|
-| main | 参数与配置校验，包住整个命令                  | `cli.py` / `config.py`         | ✅      |
-| com  | `filelist.f`、编译目标                        | `collect.py` / `makefile.py`   | ✅      |
-| run  | `plan.json`、`run/<case_id>` / `regress` 目标 | `plan.py` / `makefile.py`      | ✅      |
-| exec | `out/<case_id>/sim.log` + `status.json`       | `executor.py`（`solouvm _exec`）| —       |
-| end  | `results.json` / `results.txt`、退出码        | `status.py` / `report.py`      | ✅      |
-
-`gen` / `build` / `run` / `regress` 都会先走 main → com → run；exec 由生成的 `Makefile` 调用，不经过 hook。
-
-### 3.2 判定归属：`_exec` 判定，`end` 只收账
-
-一个 case 的结论取决于 `rc`、信号、是否超时，这些只有**启动进程的人**知道。所以判定在 `_exec` 里完成并写入 `status.json`；`end` **从不读原始日志**，只聚合 `status.json`。由此：
-
-- `end` 幂等，可反复执行、可只汇总部分 case；
-- 挂死的仿真由 `_exec` 超时杀掉并判 `timeout`，不存在"等一个永远不来的日志"。
-
-判定顺序固定，先命中者为准：
-
-```text
-被信号杀死 → killed
-超时        → timeout
-rc != 0     → fail
-fail_regex  → fail
-UVM_ERROR / UVM_FATAL / UVM_WARNING 超上限 → fail   （WARNING 仅在配置了上限时生效）
-UVM 日志缺 Report Summary，且 pass_regex 未命中 → fail
-非 UVM：SOLOUVM_DONE status=fail 或缺失该标记 → fail
-其余 → pass
-```
-
-`pass_regex` 只能救"缺 Report Summary"这一条启发式，不能覆盖任何硬失败。判定之后再应用 `expect_fail`：`fail → xfail`（算通过），`pass → xpass`（算失败）。
-
-### 3.3 执行边界：L1 只生成，L2 托管执行
-
-| 层 | 命令                                | 谁起进程                                    |
-|----|-------------------------------------|---------------------------------------------|
-| L1 | `solouvm gen`，之后 `solouvm end`   | 用户：`make build` / `make regress` / 自己的调度系统 |
-| L2 | `solouvm build` / `run` / `regress` | solouvm 调 `make`，`make` 调 `_exec`        |
-
-两条路产出**同样的** `status.json`。`_exec` 只读 `plan.json`，不加载配置、不 import 用户代码，因此可以被任意调度器在任意目录重复调用。
-
-## 4. 用户接口
-
-### 4.1 三个配置文件（放在项目根）
-
-| 文件              | 导出            | 内容                                                         |
-|-------------------|-----------------|--------------------------------------------------------------|
-| `solouvm.conf.py` | `CFG = {...}`   | 项目级配置：simulator、top、incdirs、defines、seeds、jobs、timeout、checks |
-| `filelist.py`     | `FILES = [...]` | 编译文件，路径相对项目根，支持 glob                          |
-| `case.py`         | `CASES = [...]` | `list[solouvm.Case]`                                         |
-
-`FILES` / `CASES` 也可以写成同名函数（`files()` / `cases()`）。
+`solouvm.conf.py`：
 
 ```python
-# case.py
+CFG = {
+    "project": "myproj",
+    "simulator": "vcs",
+    "top": "tb_top",
+    "regress": {"seeds": 3, "jobs": 16},
+    "run": {"timeout": "30m"},
+    "checks": {"max_uvm_error": 0, "fail_regex": ["TEST FAILED"]},
+    "providers": {                     # 团队共享的命名 provider，入库
+        "farm": {
+            "launcher": {"kind": "lsf", "queue": "normal"},
+            "setup": "module load vcs",
+        },
+    },
+}
+```
+
+`solouvm.local.py`（个人配置，不入库，深度合并到 `CFG` 上）：
+
+```python
+LOCAL = {
+    "provider": "farm",
+    "providers": {
+        "farm": {
+            "transport": {"kind": "ssh", "host": "simbox", "workdir": "/work/wp/myproj"},
+            "sync": {"kind": "rsync"},
+        },
+    },
+}
+```
+
+`filelist.py`：
+
+```python
+FILES = {
+    "rtl": ["rtl/**/*.sv", "-f ip/vendor_ip.f"],   # 设计代码，可导入已有 .f
+    "tb":  ["tb/pkg/*.sv", "tb/if/*.sv"],          # UVM 包、agent、interface
+    "top": ["tb/tb_top.sv", "tb/binds.sv"],        # 顶层、bind、DUT 层次引用
+}
+```
+
+`case.py`：
+
+```python
 from solouvm import Case
 
 CASES = [
     Case(name="smoke", uvm_test="smoke_test"),
-    Case(name="num", uvm_test="num_test", params={"NUM": 32}, tags=("nightly",)),
-    Case(name="known_bug", uvm_test="num_test", expect_fail=True),
+    Case(name="burst", uvm_test="burst_test", params={"NUM": 32}, tags=("nightly",)),
+    Case(name="known_bug", uvm_test="burst_test", expect_fail=True),
 ]
 ```
 
-> 配置文件必须叫 `solouvm.conf.py`，**不能叫 `solouvm.py`**：同名文件会遮蔽库本身，`python -m solouvm` 会静默导入配置而不是 solouvm。见 [design-decisions.md](doc/design-decisions.md) D9。
-
-### 4.2 Hook
+case 本身就是文档、进度表和 bug 登记表：说明、负责人、开发阶段、todo、bug、调试记录都写在 case 里，不用另外维护文档。
 
 ```python
-# <项目根>/pre_hook_run.py      文件名：{pre,post}_hook_{main,com,run,end}.py
-def hook(ctx):  # ctx: stage / when / command / root / workdir / project / verbose [/ plan]
-    ...
+Case(
+    name="burst",
+    uvm_test="burst_test",
+    owner="wp",
+    stage="wip",                    # planned / wip / ready / signoff
+    doc="验证 AXI burst：INCR / WRAP / FIXED，长度 1–256。",
+    notes=[
+        Bug(id=1, title="WRAP 跨 4K 边界时地址回绕错误", status="open", seed=4417, found="2026-11-02"),
+        Todo("补 narrow transfer 场景"),
+        Log("2026-11-02", "4417 必现；addr_q 在第二拍回绕成 0"),
+    ],
+)
 ```
 
-- 返回值忽略；**抛异常 → 命令中止，退出码 2**；
-- `post_hook_main` 在异常路径上也会执行，可用于清理；
-- `ctx["plan"]` 从 `post_hook_run` 起可用；
-- `--no-hooks` 跳过所有 hook（CI 中隔离用户逻辑）。
-
-## 5. 命令
-
-| 命令                                  | 作用                                         |
-|---------------------------------------|----------------------------------------------|
-| `solouvm gen`                         | 收集并生成全部产物，不编译、不执行           |
-| `solouvm build`                       | `gen` + `make build`                         |
-| `solouvm run --case NAME [--case …]`  | `gen` + 只跑指定 case + 汇总这些 case        |
-| `solouvm regress`                     | `gen` + 跑 plan 中全部 case + 汇总           |
-| `solouvm end [--allow-missing]`       | 只汇总；`--allow-missing` 把未跑的 case 记为 `skip` |
-| `solouvm clean`                       | 删除运行目录与结果文件                       |
-| `solouvm _exec`                       | 内部命令，由生成的 `Makefile` 调用           |
-
-常用参数：`-c PATH`（指定配置）、`-v` / `-q`、`--no-hooks`、`--seed N`（可重复）/ `--seeds 1-5,42`、`-j N`。
-
-## 6. 契约文件
-
-```text
-<root>/
-  filelist.f                          # 编译文件（含 +incdir+ / +define+）
-  Makefile                            # 不存在时生成，只有一行 include .solouvm/Makefile
-  .solouvm/
-    Makefile                          # build / run/<case_id> / regress / clean
-    plan.json                         # 本次 case × seed，执行期唯一事实来源
-    out/<case_id>/sim.log             # stdout + stderr，由 _exec 重定向
-    out/<case_id>/status.json         # 单 case 判定
-    results.json  results.txt         # 聚合结果
-```
-
-- `case_id = <case>__<seed>`，同时是目录名和 make 目标名；
-- 三个 JSON 都带 `"schema": 1`，版本不符直接报错，不猜；
-- `end` 只统计 `plan.json` 中的 case，不扫描 `out/*`，不会混入历史结果。
-
-## 7. 退出码
-
-| 码  | 含义                                                       |
-|-----|------------------------------------------------------------|
-| 0   | 全部通过（`xfail` 计为通过）                               |
-| 1   | 至少一个 `fail` / `timeout` / `error` / `killed` / `xpass` |
-| 2   | 配置、环境或 hook 错误（没有产出可判定的结果）             |
-| 130 | Ctrl-C 中断                                                |
-
-> 已知例外：编译失败目前直接透传 `make` 的退出码，计划归入 2。
-
-## 8. 环境要求
-
-- Python >= 3.10，Linux / macOS（进程组超时清理依赖 POSIX）；
-- 无需安装：`uv run solouvm …`、`python -m solouvm …`（`PYTHONPATH` 指向仓库）或 `pip install -e .` 任选；
-- 内置仿真器：`vcs` / `xrun` / `iverilog`，以及调试用的 `echo`；其他仿真器通过 `CFG["sim"]` 自定义编译与运行命令。
-
-## 9. 状态与路线图
-
-| 能力                                                       | 状态 |
-|------------------------------------------------------------|------|
-| 配置加载（`solouvm.conf.py` / `filelist.py` / `case.py`）  | ✅   |
-| 文件收集、`filelist.f` 生成                                | ✅   |
-| case × seed 计划（`plan.json`）                            | ✅   |
-| Makefile 生成（`build` / `run/<case_id>` / `regress`）     | ✅   |
-| 单 case 执行器 `_exec`（超时、信号、日志重定向、retry）    | ✅   |
-| 日志判定（UVM / 非 UVM）、`expect_fail`                    | ✅   |
-| 聚合 `end`、`results.json` / `results.txt`、退出码         | ✅   |
-| `pre` / `post` hook（main / com / run / end）              | ✅   |
-| 编译失败归类为退出码 2                                     | ⬜   |
-| UVM 验证框架骨架生成（命令名待定）                         | ⬜   |
-| 失败自动带波形重跑                                         | ⬜   |
-| 覆盖率 db 收集 / merge                                     | ⬜   |
-| 分片 `--shard i/n`、重跑失败 case                          | ⬜   |
-| junit / html 报告                                          | ⬜   |
-
-## 10. 文档
-
-| 文档                                               | 内容                                         |
-|----------------------------------------------------|----------------------------------------------|
-| [doc/getting-started.md](doc/getting-started.md)   | 从空目录到第一个 case 通过；配置示例、生成物 |
-| [doc/design-decisions.md](doc/design-decisions.md) | 每条设计决策的现状 / 理由 / 代价，未决事项   |
-| [doc/python-craft.md](doc/python-craft.md)         | 这份代码的 Python 写法思路与练习             |
-| [examples/demo](examples/demo)                     | 最小可运行工程（假仿真器）                   |
-
-README 是总纲：只写结论与边界。细节以 `doc/` 为准，二者冲突时修 `doc/` 或修 README，不留两套说法。
-
-## 11. 开发
+日常使用：
 
 ```bash
-uv sync
-uv run pytest                 # 含假仿真器驱动的全流程测试，不需要 EDA 工具
-uv run pytest --cov=solouvm
-uv run ruff check .
-uv run solouvm -c examples/demo/solouvm.conf.py regress
+solouvm check                       # 几秒内用 slang 检查语法
+solouvm regress --tag nightly       # 生成 → 推到 B → 编译 → 跑 → 读回 → 判定 → 报告
+solouvm rerun --failed              # 用相同种子重跑上一轮失败的 job
+solouvm judge                       # 不重跑，只按当前规则重新判定
+solouvm notes                       # 列出所有 case 中未解决的 bug 与 todo
+solouvm doc -o docs/cases           # 每个 case 导出一份 markdown，附总索引
 ```
 
-## 12. 许可证
+不想让 solouvm 托管执行时，也可以手动操作：
+
+```bash
+solouvm gen                         # A：只生成
+# 把项目目录交给 B 或调度系统，在 B 上：
+make build && make -j16 regress
+# 回到 A：
+solouvm judge
+```
+
+## 4. 计划中的命令
+
+| 命令 | 作用 |
+|------|------|
+| `gen` | 收集文件和 case，生成全部产物 |
+| `build` | 生成，并在 B 上编译 |
+| `run` / `regress` | 生成、编译，跑选中的 / 全部 job，然后判定 |
+| `judge` | 读取事实文件与日志，判定、汇总、出报告；可反复执行 |
+| `rerun` | 重跑上一轮失败的 job |
+| `list` | 列出将要执行的 job，不生成、不执行 |
+| `check` | fast compile：slang 检查、UVM 侧 fake_top 编译、RTL 增量编译 |
+| `notes` | 跨所有 case 查询记录，默认列出全部未解决的 bug 与 todo |
+| `doc` | 把每个 case 的说明与记录导出为 markdown，附总索引 |
+| `progress` | 验证进度总览：各阶段 case 数、通过率、按 owner 统计的未解决 bug 与 todo |
+| `init` / `doctor` | 生成最小项目 / 检查控制机与执行机的环境 |
+| `status` / `log` / `stop` | 查看进行中的回归 / 读取执行机上的日志 / 终止本轮回归 |
+| `clean` | 清理生成物与运行目录 |
+
+退出码：0 全部通过；1 有测试失败；2 配置、环境或编译错误；130 被中断。
+
+## 5. 不做什么
+
+- 不解析 YAML / JSON / TOML 配置。
+- 不在执行机上做判定。
+- 不把波形、覆盖率库回传到控制机。
+- 不管调试：波形查看、Verdi 等 GUI 在执行机上自行使用。
+- 不做 IP 依赖管理：交给 FuseSoC / Bender，再导入它们输出的 `.f`。
+- 不做 lint、formal、综合流程。
+
+## 6. 文档
+
+| 文档 | 内容 |
+|------|------|
+| [doc/requirements.md](doc/requirements.md) | 全部功能需求、优先级、已决问题 |
+| [doc/architecture.md](doc/architecture.md) | 流水线、模块划分、目录布局、生成物、provider 接口 |
+| [doc/config.md](doc/config.md) | `solouvm.conf.py` / `solouvm.local.py` / `filelist.py` / `case.py` 完整参考 |
+| [doc/cli.md](doc/cli.md) | 全部命令、参数与退出码 |
+| [doc/verdict.md](doc/verdict.md) | 判定规则、waiver、expect_fail、retry、失败签名 |
+| [doc/fast-compile.md](doc/fast-compile.md) | slang 检查、fake_top、RTL 增量编译 |
+| [doc/formats.md](doc/formats.md) | `job.facts`、`plan.json`、`results.json` 等文件格式 |
+| [doc/decisions.md](doc/decisions.md) | 设计决策记录：理由、代价、备选 |
+| [todo.md](todo.md) | 实现进度 |
+
+所有文档目前均为设计稿，尚无代码。
+
+README 是总纲，只写结论与边界；细节以 `doc/` 为准，二者冲突时修正其一，不留两套说法。
+
+## 7. 许可证
 
 MIT，见 [LICENSE](LICENSE)。
