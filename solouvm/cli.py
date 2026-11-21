@@ -7,10 +7,11 @@ import contextlib
 import json
 import shlex
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 
-from solouvm import __version__, output, pipeline, ui
+from solouvm import __version__, hooks, output, pipeline, ui
 from solouvm.backends import get_backend
 from solouvm.backends.base import Backend
 from solouvm.check import format_check_result, run_check
@@ -422,7 +423,14 @@ def _cmd_gen(args: argparse.Namespace) -> int:
     config, provider = _load_ctx(args)
     plan = _plan_for_exec(config, provider, args)
     flist = collect_project_files(config)
-    res = pipeline.gen(config=config, plan=plan, files=flist, provider=provider)
+    res = pipeline.gen(
+        config=config,
+        plan=plan,
+        files=flist,
+        provider=provider,
+        _stage=(1, 1),
+        _emit_json_events=False,
+    )
     if ui.is_json_mode():
         output.emit_json("gen", res, next_=["solouvm build", "solouvm regress"])
         return 0
@@ -444,6 +452,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
         modes=args.build_modes or None,
         dry_run=args.dry_run,
         jobs=args.jobs,
+        verbose=args.verbose,
     )
     if ui.is_json_mode():
         output.emit_json("build", res)
@@ -689,26 +698,85 @@ def _cmd_judge(args: argparse.Namespace) -> int:
     actual_run = resolve_run_id(config.root, args.run_id)
     rdir = run_dir(config.root, actual_run)
     provider, plan = _resolve_run_provider(config, provider, args, actual_run)
-    results = judge_run(
-        config=config,
-        plan=plan,
-        provider=provider,
-        allow_missing=args.allow_missing,
-        partial=args.partial,
-    )
-    payload = write_results(
-        rdir,
-        results,
-        run_id=actual_run,
-        partial=args.partial,
-        judged_at=__import__("datetime").datetime.now().astimezone(),
-        config=config,
-    )
-    code = judge_exit_code(results)
+    root = Path(config.root)
+    started = time.monotonic()
+    jobs_desc = f"{len(plan.jobs)} job" if len(plan.jobs) == 1 else f"{len(plan.jobs)} jobs"
+    with ui.live_runner(f"judge {actual_run}"):
+        ui.stage_start("judge", f"evaluating {jobs_desc}", index=1, total=1)
+        try:
+            hooks.run_hook(
+                phase="pre",
+                stage="judge",
+                root=root,
+                command="judge",
+                config=config,
+                plan=plan,
+                provider=provider,
+                run_id=actual_run,
+                emit_json_events=False,
+            )
+            results = judge_run(
+                config=config,
+                plan=plan,
+                provider=provider,
+                allow_missing=args.allow_missing,
+                partial=args.partial,
+            )
+            payload = write_results(
+                rdir,
+                results,
+                run_id=actual_run,
+                partial=args.partial,
+                judged_at=__import__("datetime").datetime.now().astimezone(),
+                config=config,
+            )
+            code = judge_exit_code(results)
+            hooks.run_hook(
+                phase="post",
+                stage="judge",
+                root=root,
+                command="judge",
+                config=config,
+                plan=plan,
+                provider=provider,
+                run_id=actual_run,
+                results=results,
+                payload=payload,
+                exit_code=code,
+                emit_json_events=False,
+            )
+        except BaseException:
+            ui.stage_done(
+                "judge",
+                "failed",
+                index=1,
+                total=1,
+                ok=False,
+                duration_s=round(time.monotonic() - started, 4),
+            )
+            raise
+        summary_map = payload["summary"]
+        assert isinstance(summary_map, dict)
+        passed = int(summary_map.get("passed", 0) or 0)
+        total = int(summary_map.get("total", 0) or 0)
+        not_passed = max(0, total - passed)
+        judge_detail = (
+            f"{passed}/{total} passed"
+            if not_passed == 0
+            else f"{passed}/{total} passed, {not_passed} failed"
+        )
+        ui.stage_done(
+            "judge",
+            judge_detail,
+            index=1,
+            total=1,
+            ok=(code == 0),
+            duration_s=round(time.monotonic() - started, 4),
+        )
     if ui.is_json_mode():
         output.emit_json("judge", payload)
     else:
-        ui.summary(render_text(payload))
+        ui.print_run_summary(payload, fallback_text=render_text(payload))
     return code
 
 
@@ -752,7 +820,14 @@ def _cmd_report(args: argparse.Namespace) -> int:
         output.emit_json("report", json_data)
         return 0
     for fmt in formats:
-        print(render_report(payload, fmt=fmt, project=config.project, compare=compare_data))
+        if fmt == "text" and ui.use_rich():
+            ui.print_run_summary(
+                payload,
+                compare=compare_data,
+                fallback_text=render_text(payload, compare=compare_data),
+            )
+        else:
+            print(render_report(payload, fmt=fmt, project=config.project, compare=compare_data))
     return 0
 
 
@@ -1323,6 +1398,8 @@ def main(argv: list[str] | None = None) -> int:
         verbose=int(args.verbose),
         limit=max(eff_limit, 0),
     )
+    hooks.reset()
+    hooks.set_enabled(not bool(getattr(args, "no_hooks", False)))
     canon = getattr(args, "canon_cmd", "")
     try:
         if eff_limit < 0:
@@ -1339,8 +1416,36 @@ def main(argv: list[str] | None = None) -> int:
             parser.print_usage(sys.stderr)
             return 2
         check_role(args.role, canon)
-        return int(func(args))
+
+        hook_root: Path | None = None
+        if canon and canon not in {"init", "help", "update", "completion", "schema"}:
+            with contextlib.suppress(ConfigError):
+                start = Path(args.config) if args.config else Path.cwd()
+                hook_root = find_config(start, search_parents=(args.config is None)).parent
+        emit_main_pre_json = (canon in {"build", "run", "regress", "rerun"}) and not bool(
+            getattr(args, "dry_run", False)
+        )
+        if hook_root is not None:
+            hooks.run_hook(
+                phase="pre",
+                stage="main",
+                root=hook_root,
+                command=canon,
+                emit_json_events=emit_main_pre_json,
+            )
+        rc = int(func(args))
+        if hook_root is not None:
+            hooks.run_hook(
+                phase="post",
+                stage="main",
+                root=hook_root,
+                command=canon,
+                exit_code=rc,
+                emit_json_events=False,
+            )
     except SolouvmError as exc:
         return output.fail(exc, command=canon or "solouvm")
     except KeyboardInterrupt:
         return 130
+    else:
+        return rc

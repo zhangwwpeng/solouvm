@@ -14,7 +14,7 @@
 | `case.py` | `CASES = [...]` 或 `cases()` | 入库 | case 定义及其记录 |
 | `cases/*.py` | 每个文件 `CASE = Case(...)` | 入库 | 可选：一个 case 一个文件（M-15） |
 | `tbspec.py` | `ENVS = [...]` | 入库 | UVM 环境描述，供 `solouvm new` / `uvm sync` 生成组件（U-02），见 §6 |
-| `pre_hook_<阶段>.py` / `post_hook_<阶段>.py` | `hook(ctx)` | 入库 | A 端 hook（W-01，待定） |
+| `pre_hook_<阶段>.py` / `post_hook_<阶段>.py` | `hook(ctx)` | 入库 | A 端 hook，可放项目根目录或 `hooks/` 下；支持 `main`/`gen`/`push`/`build`/`run`/`judge`，可用 `--no-hooks` 跳过；`ctx.log()` / `print()` 归入阶段视口随成功收起，`ctx.echo()` / `solouvm.echo()` 永久显示在终端（W-01..W-03） |
 
 规则：
 

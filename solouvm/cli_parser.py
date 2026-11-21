@@ -33,7 +33,7 @@ def add_global_flags(parser: argparse.ArgumentParser, *, suppress: bool) -> None
         "--no-hooks",
         action="store_true",
         default=argparse.SUPPRESS if suppress else False,
-        help="Skip A-side hooks (reserved)",
+        help="Skip A-side pre/post hook scripts",
     )
     parser.add_argument("--provider", default=d, help="Override configured provider")
     parser.add_argument(

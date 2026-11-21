@@ -1,0 +1,6 @@
+.solouvm/
+solouvm.local.py
+results.json
+results.txt
+junit.xml
+*.orphan

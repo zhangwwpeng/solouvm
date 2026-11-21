@@ -28,7 +28,7 @@ solouvm [全局参数] <命令> [命令参数]
 | `-c, --config PATH` | 配置文件或其所在目录；默认向上查找 `solouvm.conf.py` |
 | `-v` / `-vv` | `-v` 把仿真输出同时打到终端；`-vv` 再打印 solouvm 执行的每条外部命令（Z-07） |
 | `-q, --quiet` | 只输出错误与最终摘要 |
-| `--no-hooks` | 跳过全部 A 端 hook（W-03，待定） |
+| `--no-hooks` | 跳过全部 A 端 hook（`pre_hook_<阶段>.py` / `post_hook_<阶段>.py`，W-03） |
 | `--provider NAME` | 临时指定 provider（H-01a） |
 | `--json` | 以 JSON 输出，结构见 §1.4（N-17） |
 | `--limit N` | 列表与日志的输出上限，`0` 表示不截断（N-19） |
@@ -75,7 +75,9 @@ solouvm [全局参数] <命令> [命令参数]
 
 默认的人类输出同样遵守输出上限：列表超过 50 行、日志超过 200 行时截断并提示，用全局参数 `--limit` 调整。
 
-标准输出不是终端时（被 AI、管道、CI 读取），不输出颜色与控制字符；进度不做原地刷新，改为每完成一个 job 打印一行（N-22）。
+标准输出不是终端时（被 AI、管道、CI 读取），不输出颜色与控制字符；进度不做原地刷新，改为阶段跳转行、简洁状态行与每完成一个 job 打印一行（N-22）。在交互终端（TTY）下运行 `gen` / `build` / `run` / `regress` / `rerun` / `judge` 时，默认按阶段在底部状态栏上方展开固定高度的可折叠实时视口（滚动展示 hook 中的 `ctx.log()`/`print()` 与最新编译/仿真日志），阶段成功后自动收起并列对齐为单行 `✓ [i/5] stage  ...`，若阶段失败则保留尾部日志便于排查；传 `-v` 可全程保留展开的完整日志（非终端加 `-v` 亦可流式输出完整纯文本日志）。如需在收起后仍永久保留某条重要信息，可显式调用 `ctx.echo(...)` 或 `solouvm.echo(...)`（`--json` 与 `--quiet` 下自动静默）。
+
+`--json` 模式下，`build` / `run` / `regress` / `rerun` 会按执行进度先输出 `stage_start`、`stage_done`、`hook_start`、`hook_done`、`build_cached`、`build_start`、`build_done`、`progress` 与 `job_done` 等 JSON Lines 事件，最后输出总信封对象。
 
 ### 1.5 角色与权限
 
@@ -218,7 +220,7 @@ gen → push → 在 B 上编译。默认编译所选 case 用到的全部 build
 | `--build MODE` | 只编译指定的 build mode，可重复 |
 | `--rebuild` | 忽略已有的成功标记，强制重新编译（产物写入新目录） |
 
-编译键相同且已编译成功时直接复用（D-06）。编译失败时打印编译日志中第一个错误的位置与上下文，退出码 2（D-03）。
+编译键相同且已编译成功时直接复用并提示 `[build/<mode>] cached (<key>)`（D-06）。交互终端默认在下方状态栏上方实时滚动输出 `build.log`（单模式原样输出，多模式带 `[build/<mode>]` 前缀）；非终端模式下加 `-v` 亦可实时流式输出，`--json` 输出 `build_cached`/`build_start`/`build_done` 事件。编译失败时打印编译日志中第一个错误的位置与上下文，退出码 2（D-03）。
 
 ### `solouvm run` / `solouvm regress`
 
@@ -229,7 +231,7 @@ gen → push → build → run → judge → report。两者流程相同，区�
 | `regress` | 选择全部可回归的 case（见 config.md §5.1 的 stage 表） |
 | `run` | 报错，要求至少给出 `--case` 或 `--tag`，避免误跑全量 |
 
-默认阻塞，期间显示进度（H-13）；输出不是终端时改为每完成一个 job 打印一行，`--json` 时输出 JSON Lines 事件：
+默认阻塞，执行 `gen` → `push` → `build` → `run` → `judge` 五个核心阶段，并在各阶段切换时使用 `[1/5] Generate` → `[2/5] Sync` → `[3/5] Compile` → `[4/5] Simulate` → `[5/5] Judge` 列对齐展示（对应内部阶段名 `gen`/`push`/`build`/`run`/`judge` 用于 hook 脚本 `pre_hook_<阶段>.py` / `post_hook_<阶段>.py` 与 `--json` 事件）；交互终端默认在每个阶段进行时于固定高度的 `▾ [i/5] <Stage>` 视口内实时滚动 hook 输出与编译/仿真日志，成功后自动收起为列对齐的单行 `✓ [i/5] <Stage>`（失败保留尾部日志，传 `-v` 保持展开），结尾以单张统一表格汇总运行与全部 job 结果，底部状态栏稳定单行显示当前阶段进度与耗时；输出不是终端时改为阶段行与简洁状态行（加 `-v` 可实时输出完整编译与仿真日志），`--json` 时输出 `stage_*`、`hook_*`、`build_*`、`progress` 与 `job_done` 等 JSON Lines 事件（H-13）：
 
 ```text
 [12:03:41] 37/120 done  pass 33  fail 3  error 1  running 16  queued 67  eta 41m

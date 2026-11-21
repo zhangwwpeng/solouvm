@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import io
 import json
+import re
 import sys
 import types
 from pathlib import Path
@@ -144,6 +145,276 @@ def test_tty_uses_rich_when_not_json(monkeypatch):
     assert "UVM_ERROR [AXI_SCB] [b]literal" in out
     assert "burst__1" in out
     assert "┏" in out  # rendered via Rich Table box drawing
+
+
+def test_live_runner_tty_and_non_tty_modes(monkeypatch, capsys):
+    # 1. Non-TTY mode: plain stdout, no ANSI, no live footer
+    ui.setup(json_mode=False, quiet=False)
+    with ui.live_runner("building default") as live:
+        assert live.is_live is False
+        live.log("[AXI_MON] plain line")
+        live.update("building default (1 lines)")
+    out = capsys.readouterr().out
+    assert "[AXI_MON] plain line" in out
+    assert "\x1b[" not in out
+
+    # 2. --json and --quiet suppress live logs and Rich live footer
+    for kwargs in ({"json_mode": True}, {"quiet": True}):
+        buf = _TtyBuffer()
+        monkeypatch.setattr(sys, "stdout", buf)
+        ui.setup(**kwargs)
+        with ui.live_runner("building") as live:
+            assert live.is_live is False
+            live.log("should stay silent")
+        assert buf.getvalue() == ""
+
+    # 3. TTY mode activates Rich Live with transient footer & literal brackets
+    buf = _TtyBuffer()
+    monkeypatch.setattr(sys, "stdout", buf)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setenv("COLUMNS", "160")
+    ui.setup(json_mode=False, quiet=False)
+    with ui.live_runner("building default (0 lines)") as live:
+        assert live.is_live is True
+        live.log("[AXI_MON] compiling a.sv")
+        ui.info("via active live [uvm_pkg]")
+        live.update("building default (1 lines)")
+    assert live.is_live is False
+    assert ui._state.active_live is None
+    tty_out = buf.getvalue()
+    assert "[AXI_MON] compiling a.sv" in tty_out
+    assert "via active live [uvm_pkg]" in tty_out
+
+
+def test_live_runner_collapsible_stages_and_verbose_mode(monkeypatch):
+    ansi_re = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+    # 1. Default TTY (verbose=0): collapsible viewport hides on success, keeps tail on failure
+    buf = _TtyBuffer()
+    monkeypatch.setattr(sys, "stdout", buf)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    ui.setup(json_mode=False, quiet=False, verbose=0)
+    with ui.live_runner("run r1") as live:
+        assert live.is_live is True
+        ui.stage_start("gen", "planning 1 job (run.mk, filelist)", index=1, total=5)
+        assert live.is_collapsible_stage is True
+        h_empty = len(live._render_footer().renderables)
+        assert live._render_footer().renderables[-1].no_wrap is True
+        ui.hook_notice("pre", "gen", "hooks/pre_hook_gen.py", status="start")
+        live.log_batch(["line_one", "line_two"])
+        assert [entry[2] for entry in live._stage_lines][-2:] == ["line_one", "line_two"]
+        assert len(live._render_footer().renderables) == h_empty
+        live.log_batch([f"extra_{i}" for i in range(20)])
+        assert len(live._render_footer().renderables) == h_empty
+        ui.stage_done(
+            "gen",
+            "planned 1 job (run.mk, filelist)",
+            index=1,
+            total=5,
+            ok=True,
+            duration_s=0.05,
+        )
+        assert live.is_collapsible_stage is False
+        assert len(live._render_footer().renderables) == h_empty
+
+        ui.stage_start("build", "compiling mode=default", index=3, total=5)
+        live.log_batch(["FAIL_LINE_A", "FAIL_LINE_B"])
+        ui.stage_done(
+            "build",
+            "failed mode=default (rc=2)",
+            index=3,
+            total=5,
+            ok=False,
+            duration_s=0.2,
+        )
+        assert live.is_collapsible_stage is False
+
+    plain = ansi_re.sub("", buf.getvalue())
+    gen_line = f"✓ [1/5] Generate  {'planned 1 job (run.mk, filelist)':<34}    0.05s"
+    fail_line = f"✗ [3/5] Compile   {'failed mode=default (rc=2)':<34}    0.20s"
+    assert gen_line in plain
+    assert "▾ [3/5] Compile   compiling mode=default" in plain
+    assert "FAIL_LINE_A" in plain
+    assert "FAIL_LINE_B" in plain
+    assert fail_line in plain
+    assert gen_line.index("0.05s") == fail_line.index("0.20s")
+
+    # 2. TTY with verbose=1 (-v): stages stay permanently expanded (is_collapsible_stage=False)
+    buf_v = _TtyBuffer()
+    monkeypatch.setattr(sys, "stdout", buf_v)
+    ui.setup(json_mode=False, quiet=False, verbose=1)
+    with ui.live_runner("run r2") as live_v:
+        ui.stage_start("gen", "planning 1 job (run.mk, filelist)", index=1, total=5)
+        assert live_v.is_collapsible_stage is False
+        live_v.log_batch(["VERBOSE_LINE_1"])
+        ui.stage_done(
+            "gen",
+            "planned 1 job (run.mk, filelist)",
+            index=1,
+            total=5,
+            ok=True,
+            duration_s=0.02,
+        )
+
+    plain_v = ansi_re.sub("", buf_v.getvalue())
+    assert "==> [1/5] Generate  planning 1 job (run.mk, filelist)" in plain_v
+    assert "VERBOSE_LINE_1" in plain_v
+    assert f"✓ [1/5] Generate  {'planned 1 job (run.mk, filelist)':<34}    0.02s" in plain_v
+
+
+def test_ui_echo_persists_above_collapsible_stage_and_respects_json_quiet(monkeypatch):
+    ansi_re = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+    buf = _TtyBuffer()
+    monkeypatch.setattr(sys, "stdout", buf)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    ui.setup(json_mode=False, quiet=False, verbose=0)
+    with ui.live_runner("run r1") as live:
+        ui.stage_start("gen", "planning 1 job (run.mk, filelist)", index=1, total=5)
+        live.log("EPHEMERAL_MSG")
+        ui.echo("PERSIST_MSG [OK]", source="hooks/post_hook_judge.py")
+        ui.echo("AUTO_SRC_MSG")
+        assert "EPHEMERAL_MSG" in [entry[2] for entry in live._stage_lines]
+        assert "PERSIST_MSG [OK]" not in [entry[2] for entry in live._stage_lines]
+        assert "AUTO_SRC_MSG" not in [entry[2] for entry in live._stage_lines]
+        ui.stage_done(
+            "gen",
+            "planned 1 job (run.mk, filelist)",
+            index=1,
+            total=5,
+            ok=True,
+            duration_s=0.03,
+        )
+        assert not live._stage_lines
+
+    plain = ansi_re.sub("", buf.getvalue())
+    assert "  [hooks/post_hook_judge.py] PERSIST_MSG [OK]" in plain
+    assert "test_ui.py] AUTO_SRC_MSG" in plain
+    assert f"✓ [1/5] Generate  {'planned 1 job (run.mk, filelist)':<34}    0.03s" in plain
+
+    for kwargs in ({"json_mode": True}, {"quiet": True}):
+        silent = _TtyBuffer()
+        monkeypatch.setattr(sys, "stdout", silent)
+        ui.setup(**kwargs)
+        ui.echo("SHOULD_NOT_EMIT")
+        assert silent.getvalue() == ""
+
+
+def test_print_run_summary_rich_tables_and_non_tty_fallback(monkeypatch, capsys):
+    ansi_re = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+    payload = {
+        "schema": 1,
+        "run_id": "r_tbl",
+        "partial": False,
+        "summary": {
+            "total": 2,
+            "passed": 1,
+            "duration_s": 2.5,
+            "by_status": {"pass": 1, "xfail": 0, "fail": 1},
+            "by_category": {"design": 1, "execution": 0, "environment": 0},
+        },
+        "jobs": [
+            {
+                "job_id": "smoke__1",
+                "case": "smoke",
+                "seed": 1,
+                "status": "pass",
+                "weak_signals": ["no UVM messages"],
+                "attempts": [{"try": 1, "duration_s": 1.25, "wave": False}],
+            },
+            {
+                "job_id": "burst__2",
+                "case": "burst",
+                "seed": 2,
+                "status": "fail",
+                "category": "design",
+                "reason": "UVM_ERROR=1",
+                "attempts": [
+                    {
+                        "try": 1,
+                        "duration_s": 1.25,
+                        "wave": False,
+                        "log": ".solouvm/runs/r_tbl/burst__2/try1/sim.log",
+                    }
+                ],
+            },
+        ],
+        "signatures": [
+            {"id": "sig1", "count": 1, "cases": ["burst"], "text": "scoreboard mismatch"}
+        ],
+    }
+    compare = {
+        "baseline_run_id": "r_base",
+        "new_failures": [
+            {"job_id": "burst__2", "prev_status": "pass", "status": "fail", "reason": "UVM_ERROR=1"}
+        ],
+    }
+
+    # 1. TTY mode: one Rich table rendered, zero-count omitted, weak & failure details shown
+    buf = _TtyBuffer()
+    monkeypatch.setattr(sys, "stdout", buf)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setenv("COLUMNS", "160")
+    ui.setup(json_mode=False, quiet=False)
+    ui.print_run_summary(payload, compare=compare, fallback_text="FALLBACK_TEXT")
+    out = buf.getvalue()
+    plain = ansi_re.sub("", out)
+    assert plain.count("┏") == 1
+    assert "FALLBACK_TEXT" not in plain
+    assert "Run r_tbl" in plain
+    assert "Total (1/2)" in plain
+    assert "50.0%" in plain
+    assert "2.500s" in plain
+    assert "pass=1" in plain and "fail=1" in plain
+    assert "xfail=0" not in plain
+    assert "burst__2" in plain and "smoke__1" in plain
+    assert "weak: no UVM messages" in plain
+    assert "sig1" in plain
+    assert "Compare vs r_base" in plain
+
+    # Empty jobs payload still renders cleanly in a single table
+    buf_empty = _TtyBuffer()
+    monkeypatch.setattr(sys, "stdout", buf_empty)
+    ui.print_run_summary(
+        {
+            "schema": 1,
+            "run_id": "r_empty",
+            "partial": False,
+            "summary": {
+                "total": 0,
+                "passed": 0,
+                "duration_s": 0.0,
+                "by_status": {},
+                "by_category": {},
+            },
+            "jobs": [],
+        },
+        fallback_text="FALLBACK_TEXT",
+    )
+    plain_empty = ansi_re.sub("", buf_empty.getvalue())
+    assert plain_empty.count("┏") == 1
+    assert "Total (0/0)" in plain_empty
+    assert "(no jobs)" in plain_empty
+
+    # 2. --quiet on TTY still renders summary tables; --json stays silent
+    buf_q = _TtyBuffer()
+    monkeypatch.setattr(sys, "stdout", buf_q)
+    ui.setup(quiet=True)
+    ui.print_run_summary(payload, fallback_text="FALLBACK_TEXT")
+    assert "r_tbl" in buf_q.getvalue()
+
+    buf_j = _TtyBuffer()
+    monkeypatch.setattr(sys, "stdout", buf_j)
+    ui.setup(json_mode=True)
+    ui.print_run_summary(payload, fallback_text="FALLBACK_TEXT")
+    assert buf_j.getvalue() == ""
+
+    # 3. Non-TTY mode emits fallback_text cleanly without ANSI escapes
+    monkeypatch.undo()
+    ui.setup(json_mode=False, quiet=False)
+    ui.print_run_summary(payload, fallback_text="FALLBACK_PLAIN\n")
+    cap = capsys.readouterr().out
+    assert "FALLBACK_PLAIN" in cap
+    assert "\x1b[" not in cap
 
 
 def test_json_mode_suppresses_human_stdout_and_disables_rich(monkeypatch, capsys):

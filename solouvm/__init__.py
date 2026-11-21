@@ -14,6 +14,7 @@ from solouvm.model import (
     Triage,
     Waiver,
 )
+from solouvm.ui import echo
 
 __version__ = "0.1.0"
 
@@ -31,4 +32,5 @@ __all__ = [
     "Triage",
     "Waiver",
     "__version__",
+    "echo",
 ]

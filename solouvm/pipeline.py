@@ -11,12 +11,12 @@ import shlex
 import shutil
 import subprocess
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from solouvm import __version__, output, ui
+from solouvm import __version__, hooks, output, ui
 from solouvm.backends import fake_sim_source, get_backend
 from solouvm.buildkey import compute_build_keys
 from solouvm.collect import collect_cases
@@ -189,83 +189,162 @@ def gen(
     rebuild: bool = False,
     solouvm_version: str = _SOLOUVM_VERSION,
     allow_overwrite: bool = False,
+    _run_hooks: bool = True,
+    _stage: tuple[int, int] | None = None,
+    _emit_json_events: bool = False,
 ) -> dict[str, object]:
     """Generate build keys, filelists, scripts, ``run.mk``, ``plan.json`` and ``env.json``."""
     root = Path(config.root)
     rpath = run_dir(root, plan.run_id)
-    if not allow_overwrite and rpath.exists():
-        has_artifacts = (
-            (rpath / "results.json").exists()
-            or (rpath / "triage").exists()
-            or (rpath / "launch.pid").exists()
-            or any(rpath.glob("*/try*"))
-        )
-        if has_artifacts:
-            raise ConfigError(
-                f"run directory {rpath} already contains execution artifacts",
-                code="CFG_INVALID",
-                hint=f"choose a new run_id or run 'solouvm clean --run {plan.run_id}' first",
-            )
-    backend = _backend_for(config)
     eff_provider = provider or get_provider(config, plan.provider)
-    if provider is not None:
-        plan.provider = eff_provider.name
-    _stage_bin_scripts(root, solouvm_version)
 
-    if sim_version is None and (
-        type(eff_provider.transport) is LocalTransport or backend.name == "fake"
-    ):
-        sim_version = detect_sim_version(backend, eff_provider, root)
+    def _body() -> dict[str, object]:
+        if not allow_overwrite and rpath.exists():
+            has_artifacts = (
+                (rpath / "results.json").exists()
+                or (rpath / "triage").exists()
+                or (rpath / "launch.pid").exists()
+                or any(rpath.glob("*/try*"))
+            )
+            if has_artifacts:
+                raise ConfigError(
+                    f"run directory {rpath} already contains execution artifacts",
+                    code="CFG_INVALID",
+                    hint=f"choose a new run_id or run 'solouvm clean --run {plan.run_id}' first",
+                )
+        if _run_hooks:
+            hooks.run_hook(
+                phase="pre",
+                stage="gen",
+                root=root,
+                config=config,
+                plan=plan,
+                provider=eff_provider,
+                run_id=plan.run_id,
+                files=files,
+                emit_json_events=_emit_json_events,
+            )
+        backend = _backend_for(config)
+        if provider is not None:
+            plan.provider = eff_provider.name
+        _stage_bin_scripts(root, solouvm_version)
 
-    used_modes = sorted({job.build for job in plan.jobs} or set(plan.builds))
-    bk = compute_build_keys(
-        config=config,
-        files=files,
-        backend=backend,
-        modes=used_modes,
-        run_id=plan.run_id,
-        sim_version=sim_version,
-        solouvm_version=solouvm_version,
-        provider=eff_provider.name,
-        provider_setup=eff_provider.setup,
-    )
-    build_keys = dict(bk.keys)
-    if rebuild:
-        build_keys = _apply_rebuild_salt(build_keys, run_id=plan.run_id, modes=used_modes)
-    plan.builds = build_keys
+        eff_sim_version = sim_version
+        if eff_sim_version is None and (
+            type(eff_provider.transport) is LocalTransport or backend.name == "fake"
+        ):
+            eff_sim_version = detect_sim_version(backend, eff_provider, root)
 
-    for mode, reasons in bk.non_reusable.items():
-        if reasons:
-            ui.warning(f"build '{mode}' will not be cached across runs ({reasons[0]})")
+        used_modes = sorted({job.build for job in plan.jobs} or set(plan.builds))
+        bk = compute_build_keys(
+            config=config,
+            files=files,
+            backend=backend,
+            modes=used_modes,
+            run_id=plan.run_id,
+            sim_version=eff_sim_version,
+            solouvm_version=solouvm_version,
+            provider=eff_provider.name,
+            provider_setup=eff_provider.setup,
+        )
+        build_keys = dict(bk.keys)
+        if rebuild:
+            build_keys = _apply_rebuild_salt(build_keys, run_id=plan.run_id, modes=used_modes)
+        plan.builds = build_keys
 
-    manifest = write_generated_project_files(
-        config=config,
-        plan=plan,
-        files=files,
-        backend=backend,
-        build_keys=build_keys,
-        version=solouvm_version,
-    )
+        for mode, reasons in bk.non_reusable.items():
+            if reasons:
+                ui.warning(f"build '{mode}' will not be cached across runs ({reasons[0]})")
 
-    write_plan(rpath / "plan.json", plan)
-    env_data = capture_env(
-        root,
-        run_id=plan.run_id,
-        config=config,
-        backend=backend,
-        provider=eff_provider,
-        solouvm_version=solouvm_version,
-        sim_version=sim_version,
-    )
-    write_env(rpath, env_data)
-    update_latest_link(root, plan.run_id)
+        manifest = write_generated_project_files(
+            config=config,
+            plan=plan,
+            files=files,
+            backend=backend,
+            build_keys=build_keys,
+            version=solouvm_version,
+        )
 
-    return {
-        "run_id": plan.run_id,
-        "builds": dict(plan.builds),
-        "manifest": manifest,
-        "non_reusable": bk.non_reusable,
-    }
+        write_plan(rpath / "plan.json", plan)
+        env_data = capture_env(
+            root,
+            run_id=plan.run_id,
+            config=config,
+            backend=backend,
+            provider=eff_provider,
+            solouvm_version=solouvm_version,
+            sim_version=eff_sim_version,
+        )
+        write_env(rpath, env_data)
+        update_latest_link(root, plan.run_id)
+
+        if _run_hooks:
+            hooks.run_hook(
+                phase="post",
+                stage="gen",
+                root=root,
+                config=config,
+                plan=plan,
+                provider=eff_provider,
+                run_id=plan.run_id,
+                files=files,
+                extra={"builds": dict(plan.builds), "manifest": manifest},
+                emit_json_events=_emit_json_events,
+            )
+
+        return {
+            "run_id": plan.run_id,
+            "builds": dict(plan.builds),
+            "manifest": manifest,
+            "non_reusable": bk.non_reusable,
+        }
+
+    if _stage is not None:
+        idx, total = _stage
+        jobs_desc = _plural_jobs(len(plan.jobs))
+        with (
+            ui.live_runner(f"gen {plan.run_id}"),
+            _pipeline_stage(
+                "gen",
+                f"planning {jobs_desc} (run.mk, filelist)",
+                index=idx,
+                total=total,
+                run_id=plan.run_id,
+                emit_json_events=_emit_json_events,
+            ) as st_gen,
+        ):
+            out = _body()
+            st_gen["detail"] = f"planned {jobs_desc} (run.mk, filelist)"
+            return out
+    return _body()
+
+
+def _plural_jobs(count: int) -> str:
+    return f"{count} job" if count == 1 else f"{count} jobs"
+
+
+def _format_modes_label(modes: Sequence[str]) -> str:
+    if len(modes) == 1:
+        return f"mode={modes[0]}"
+    if len(modes) > 1:
+        return f"modes={', '.join(modes)}"
+    return "default"
+
+
+def _format_push_detail(provider: Provider, manifest_len: int, *, verb: str) -> str:
+    if provider.name == "local":
+        return "local workspace (no upload)"
+    file_word = "file" if manifest_len == 1 else "files"
+    return f"{verb} {manifest_len} {file_word} -> {provider.name}"
+
+
+def _format_judge_detail(summary_map: dict[object, object]) -> str:
+    passed = int(summary_map.get("passed", 0) or 0)
+    total = int(summary_map.get("total", 0) or 0)
+    not_passed = max(0, total - passed)
+    if not_passed == 0:
+        return f"{passed}/{total} passed"
+    return f"{passed}/{total} passed, {not_passed} failed"
 
 
 def _make_assigns(vars_map: dict[str, str]) -> list[str]:
@@ -353,6 +432,517 @@ def _gen_manifest(
     return sorted(set(manifest))
 
 
+class _LogTailer:
+    """Incrementally read new complete lines from local or remote log files."""
+
+    def __init__(self, transport: Transport, root: Path) -> None:
+        self._transport = transport
+        self._root = root
+        self._is_local = isinstance(transport, LocalTransport)
+        self._local_state: dict[str, tuple[int, bytes]] = {}
+        self._remote_next: dict[str, int] = {}
+
+    def local_path(self, rel_path: str) -> Path:
+        target = Path(rel_path)
+        if target.is_absolute():
+            return target
+        t_root = getattr(self._transport, "root", None)
+        if t_root is not None:
+            return Path(t_root) / rel_path
+        return self._root / rel_path
+
+    def drain(self, rel_path: str, *, flush: bool = False) -> list[str]:
+        if self._is_local:
+            return self._drain_local(rel_path, flush=flush)
+        return self._drain_remote(rel_path, flush=flush)
+
+    def _drain_local(self, rel_path: str, *, flush: bool) -> list[str]:
+        target = self.local_path(rel_path)
+        try:
+            with open(target, "rb") as fh:
+                offset, partial = self._local_state.get(rel_path, (0, b""))
+                size = os.fstat(fh.fileno()).st_size
+                if size < offset:
+                    offset, partial = 0, b""
+                fh.seek(offset)
+                chunk = fh.read()
+                offset += len(chunk)
+        except OSError:
+            return []
+
+        buf = partial + chunk
+        lines: list[str] = []
+        last_nl = buf.rfind(b"\n")
+        if last_nl >= 0:
+            complete = buf[:last_nl].decode("utf-8", errors="replace")
+            lines.extend(line.rstrip("\r") for line in complete.split("\n"))
+            partial = buf[last_nl + 1 :]
+        else:
+            partial = buf
+
+        if flush and partial:
+            lines.append(partial.decode("utf-8", errors="replace").rstrip("\r"))
+            partial = b""
+
+        self._local_state[rel_path] = (offset, partial)
+        return lines
+
+    def _drain_remote(self, rel_path: str, *, flush: bool) -> list[str]:
+        next_line = self._remote_next.get(rel_path, 1)
+        collected: list[str] = []
+        while True:
+            batch: list[str] = []
+            try:
+                for _ln, text in self._transport.read_lines(
+                    rel_path, lines=(next_line, next_line + 1999)
+                ):
+                    batch.append(text)
+            except InfraError:
+                break
+            if not batch:
+                break
+            collected.extend(batch)
+            next_line += len(batch)
+            self._remote_next[rel_path] = next_line
+            if not flush or len(batch) < 2000:
+                break
+        return collected
+
+
+class _BuildMonitor:
+    """Monitor per-mode compile state and stream ``build.log`` incrementally."""
+
+    def __init__(
+        self,
+        *,
+        config: Config,
+        plan: Plan,
+        provider: Provider,
+        modes: Sequence[str],
+        stream_logs: bool,
+        prefix_always: bool,
+    ) -> None:
+        self._config = config
+        self._plan = plan
+        self._transport = provider.transport
+        self._root = Path(config.root)
+        self._tailer = _LogTailer(provider.transport, self._root)
+        self._stream_logs = stream_logs
+        self._is_local = isinstance(provider.transport, LocalTransport)
+
+        ordered_modes = list(dict.fromkeys(m for m in modes if plan.builds.get(m)))
+        self._use_prefix = prefix_always or len(ordered_modes) > 1
+        self.pre_cached: list[tuple[str, str]] = []
+        self.active_modes: list[tuple[str, str]] = []
+        self._started: set[str] = set()
+        self._done: set[str] = set()
+        self._line_counts: dict[str, int] = {}
+        self._stale_stats: dict[str, tuple[int, int] | None] = {}
+        self._stale_cleared: set[str] = set()
+        self._cached_announced = False
+
+        for mode in ordered_modes:
+            key = plan.builds[mode]
+            rel_dir = f".solouvm/build/{mode}/{key}"
+            if self._transport.exists(f"{rel_dir}/.ok"):
+                self.pre_cached.append((mode, key))
+            else:
+                self.active_modes.append((mode, key))
+                if self._is_local:
+                    log_path = self._tailer.local_path(f"{rel_dir}/build.log")
+                    try:
+                        st = log_path.stat()
+                    except OSError:
+                        self._stale_stats[mode] = None
+                    else:
+                        self._stale_stats[mode] = (st.st_mtime_ns, st.st_size)
+
+    @property
+    def all_done(self) -> bool:
+        return len(self._done) >= len(self.active_modes)
+
+    def announce_cached(self, live: ui.LiveRunner) -> None:
+        if self._cached_announced:
+            return
+        self._cached_announced = True
+        for mode, key in self.pre_cached:
+            if ui.is_json_mode():
+                output.emit_event(
+                    "build_cached",
+                    run_id=self._plan.run_id,
+                    mode=mode,
+                    build_key=key,
+                )
+            else:
+                live.log(f"[build/{mode}] cached ({key})")
+
+    def _read_build_facts(self, facts_rel: str) -> Facts | None:
+        if self._is_local:
+            path = self._tailer.local_path(facts_rel)
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return None
+        else:
+            if not self._transport.exists(facts_rel):
+                return None
+            try:
+                text = "\n".join(line for _, line in self._transport.read_lines(facts_rel))
+            except InfraError:
+                return None
+        try:
+            facts = parse_facts(text)
+        except FactsError:
+            return None
+        if facts.run_id != self._plan.run_id or facts.kind != "build":
+            return None
+        return facts
+
+    def _log_ready(self, mode: str, log_rel: str, facts: Facts, *, flush: bool) -> bool:
+        if mode in self._stale_cleared:
+            return True
+        if facts.state != "running" or flush:
+            self._stale_cleared.add(mode)
+            return True
+        if not self._is_local:
+            self._stale_cleared.add(mode)
+            return True
+        prev = self._stale_stats.get(mode)
+        log_path = self._tailer.local_path(log_rel)
+        try:
+            st = log_path.stat()
+        except OSError:
+            return False
+        if prev is None or (st.st_mtime_ns, st.st_size) != prev:
+            self._stale_cleared.add(mode)
+            return True
+        return False
+
+    def poll(self, live: ui.LiveRunner, *, flush: bool = False) -> None:
+        for mode, key in self.active_modes:
+            if mode in self._done:
+                continue
+            rel_dir = f".solouvm/build/{mode}/{key}"
+            facts = self._read_build_facts(f"{rel_dir}/job.facts")
+            if facts is None:
+                continue
+
+            if mode not in self._started:
+                self._started.add(mode)
+                if ui.is_json_mode():
+                    output.emit_event(
+                        "build_start",
+                        run_id=self._plan.run_id,
+                        mode=mode,
+                        build_key=key,
+                    )
+                elif not self._stream_logs:
+                    live.log(f"[{self._plan.run_id}] build/{mode} building ({key})...")
+
+            is_finished = facts.state != "running"
+            log_rel = f"{rel_dir}/build.log"
+            if self._stream_logs and self._log_ready(
+                mode, log_rel, facts, flush=(flush or is_finished)
+            ):
+                new_lines = self._tailer.drain(log_rel, flush=(flush or is_finished))
+                if new_lines:
+                    self._line_counts[mode] = self._line_counts.get(mode, 0) + len(new_lines)
+                    prefix = f"[build/{mode}] " if self._use_prefix else ""
+                    live.log_batch([f"{prefix}{line}" for line in new_lines])
+
+            if is_finished:
+                self._done.add(mode)
+                if ui.is_json_mode():
+                    output.emit_event(
+                        "build_done",
+                        run_id=self._plan.run_id,
+                        mode=mode,
+                        build_key=key,
+                        ok=bool(facts.rc == 0),
+                        rc=facts.rc,
+                        duration_s=facts.duration_s,
+                    )
+                else:
+                    dur = f"{facts.duration_s:.1f}s" if facts.duration_s is not None else "?"
+                    status = "ok" if facts.rc == 0 else f"failed (rc={facts.rc})"
+                    live.log(f"[build/{mode}] {status} ({dur})")
+
+    def footer_text(self) -> str:
+        active = [
+            f"{mode} ({self._line_counts.get(mode, 0)} lines)"
+            for mode, _key in self.active_modes
+            if mode not in self._done
+        ]
+        if active:
+            return f"building {', '.join(active)}"
+        if self.active_modes:
+            return f"built {len(self.active_modes)} mode(s)"
+        return "build cached"
+
+
+def _stage_emit_start(
+    stage: str,
+    detail: str,
+    *,
+    index: int,
+    total: int,
+    run_id: str,
+    emit_json_events: bool,
+) -> float:
+    started = time.monotonic()
+    ui.stage_start(stage, detail, index=index, total=total)
+    if emit_json_events and ui.is_json_mode():
+        output.emit_event(
+            "stage_start",
+            run_id=run_id,
+            stage=stage,
+            index=index,
+            total=total,
+            detail=detail,
+        )
+    return started
+
+
+def _stage_emit_done(
+    stage: str,
+    detail: str,
+    *,
+    index: int,
+    total: int,
+    run_id: str,
+    started: float,
+    ok: bool = True,
+    emit_json_events: bool,
+) -> None:
+    dur = round(time.monotonic() - started, 4)
+    ui.stage_done(stage, detail, index=index, total=total, ok=ok, duration_s=dur)
+    if emit_json_events and ui.is_json_mode():
+        output.emit_event(
+            "stage_done",
+            run_id=run_id,
+            stage=stage,
+            index=index,
+            total=total,
+            detail=detail,
+            ok=ok,
+            duration_s=dur,
+        )
+
+
+@contextlib.contextmanager
+def _pipeline_stage(
+    stage: str,
+    detail: str,
+    *,
+    index: int,
+    total: int,
+    run_id: str,
+    emit_json_events: bool,
+) -> Iterator[dict[str, object]]:
+    started = _stage_emit_start(
+        stage,
+        detail,
+        index=index,
+        total=total,
+        run_id=run_id,
+        emit_json_events=emit_json_events,
+    )
+    outcome: dict[str, object] = {"detail": "done", "ok": True}
+    try:
+        yield outcome
+    except BaseException:
+        _stage_emit_done(
+            stage,
+            "failed",
+            index=index,
+            total=total,
+            run_id=run_id,
+            started=started,
+            ok=False,
+            emit_json_events=emit_json_events,
+        )
+        raise
+    else:
+        _stage_emit_done(
+            stage,
+            str(outcome.get("detail", "done")),
+            index=index,
+            total=total,
+            run_id=run_id,
+            started=started,
+            ok=bool(outcome.get("ok", True)),
+            emit_json_events=emit_json_events,
+        )
+
+
+def _run_gen_and_push_stages(
+    *,
+    config: Config,
+    plan: Plan,
+    files: FileList,
+    provider: Provider,
+    rebuild: bool,
+    total_stages: int,
+    emit_json_events: bool,
+) -> list[str]:
+    """Run Stage 1 (gen) and Stage 2 (push) with stage banners and A-side hooks."""
+    root = Path(config.root)
+    jobs_desc = _plural_jobs(len(plan.jobs))
+    with _pipeline_stage(
+        "gen",
+        f"planning {jobs_desc} (run.mk, filelist)",
+        index=1,
+        total=total_stages,
+        run_id=plan.run_id,
+        emit_json_events=emit_json_events,
+    ) as st_gen:
+        gen_res = gen(
+            config=config,
+            plan=plan,
+            files=files,
+            provider=provider,
+            rebuild=rebuild,
+            _run_hooks=True,
+            _stage=None,
+            _emit_json_events=emit_json_events,
+        )
+        manifest = list(gen_res["manifest"])  # type: ignore[arg-type]
+        st_gen["detail"] = f"planned {jobs_desc} (run.mk, filelist)"
+
+    push_start = _format_push_detail(provider, len(manifest), verb="uploading")
+    with _pipeline_stage(
+        "push",
+        push_start,
+        index=2,
+        total=total_stages,
+        run_id=plan.run_id,
+        emit_json_events=emit_json_events,
+    ) as st_push:
+        hooks.run_hook(
+            phase="pre",
+            stage="push",
+            root=root,
+            config=config,
+            plan=plan,
+            provider=provider,
+            run_id=plan.run_id,
+            files=files,
+            extra={"manifest": manifest},
+            emit_json_events=emit_json_events,
+        )
+        _push_generated(config, provider, manifest)
+        hooks.run_hook(
+            phase="post",
+            stage="push",
+            root=root,
+            config=config,
+            plan=plan,
+            provider=provider,
+            run_id=plan.run_id,
+            files=files,
+            extra={"manifest": manifest},
+            emit_json_events=emit_json_events,
+        )
+        st_push["detail"] = _format_push_detail(provider, len(manifest), verb="uploaded")
+
+    return manifest
+
+
+def _run_build_phase(
+    *,
+    config: Config,
+    plan: Plan,
+    provider: Provider,
+    modes: Sequence[str],
+    make_targets: Sequence[str],
+    n_jobs: int,
+    live: ui.LiveRunner,
+    stream_logs: bool,
+    prefix_always: bool,
+    deadline: float | None = None,
+    budget_label: float | None = None,
+    keep_launch_pid: bool = False,
+) -> tuple[int, bool, bool]:
+    """Run Stage 3 build targets via launch.sh and stream ``build.log``.
+
+    Returns ``(rc, stopped_early, all_cached)``.
+    """
+    root = Path(config.root)
+    monitor = _BuildMonitor(
+        config=config,
+        plan=plan,
+        provider=provider,
+        modes=modes,
+        stream_logs=stream_logs,
+        prefix_always=prefix_always,
+    )
+    monitor.announce_cached(live)
+    if not monitor.active_modes:
+        live.update(monitor.footer_text())
+        return 0, False, True
+
+    budget_desc = f"{budget_label:g}s" if budget_label is not None else "time"
+    budget_msg = f"regression budget ({budget_desc}) exceeded; stopping run {plan.run_id}"
+    if deadline is not None and time.monotonic() >= deadline:
+        ui.warning(budget_msg)
+        return 0, True, False
+
+    run_mk_rel = f".solouvm/runs/{plan.run_id}/run.mk"
+    make_vars = _make_assigns(provider.launcher.make_vars(plan))
+    make_cmd = ["make", "-f", run_mk_rel, "-k", f"-j{n_jobs}", *make_vars, *make_targets]
+    poll_interval = 0.15 if isinstance(provider.transport, LocalTransport) else 1.0
+    launch_cmd = ["bash", ".solouvm/gen/bin/launch.sh", "--run-id", plan.run_id, "--", *make_cmd]
+
+    live.update(monitor.footer_text())
+    stopped_early = False
+    proc = provider.transport.spawn(launch_cmd, cwd=".")
+    rc = 0
+    try:
+        while proc.poll() is None:
+            if deadline is not None and time.monotonic() >= deadline:
+                ui.warning(budget_msg)
+                stopped_early = True
+                break
+            monitor.poll(live, flush=False)
+            live.update(monitor.footer_text())
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    ui.warning(budget_msg)
+                    stopped_early = True
+                    break
+                time.sleep(min(poll_interval, remaining))
+            else:
+                time.sleep(poll_interval)
+
+        if stopped_early:
+            _stop_b_processes(config=config, provider=provider, run_id=plan.run_id)
+            proc.terminate()
+            with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                proc.wait(timeout=10)
+        else:
+            rc = proc.wait()
+            monitor.poll(live, flush=True)
+            live.update(monitor.footer_text())
+    except KeyboardInterrupt:
+        _stop_b_processes(config=config, provider=provider, run_id=plan.run_id)
+        with contextlib.suppress(OSError):
+            proc.terminate()
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            proc.wait(timeout=10)
+        raise
+    finally:
+        if not keep_launch_pid:
+            with contextlib.suppress(Exception):
+                _rm_path(
+                    provider,
+                    root,
+                    f".solouvm/runs/{plan.run_id}/launch.pid",
+                    local_only=False,
+                )
+    return rc, stopped_early, False
+
+
 def build(
     *,
     config: Config,
@@ -363,6 +953,7 @@ def build(
     modes: Sequence[str] | None = None,
     dry_run: bool = False,
     jobs: int | None = None,
+    verbose: int | None = None,
     _skip_gen: bool = False,
 ) -> dict[str, object]:
     """Run ``gen -> push -> build`` for selected or active build modes."""
@@ -371,35 +962,33 @@ def build(
     selected_modes = list(modes) if modes else sorted(plan.builds or {j.build for j in plan.jobs})
     if rebuild and _skip_gen:
         _skip_gen = False
-
-    if not _skip_gen:
-        eff_files = files if files is not None else collect_project_files(config)
-        gen_res = gen(
-            config=config,
-            plan=plan,
-            files=eff_files,
-            provider=provider,
-            rebuild=rebuild,
-        )
-        manifest = list(gen_res["manifest"])  # type: ignore[arg-type]
-    else:
-        manifest = _gen_manifest(root, plan.run_id, plan.builds, config=config)
-
-    for m in selected_modes:
-        if m not in plan.builds:
-            avail = ", ".join(sorted(plan.builds))
-            raise ConfigError(
-                f"build mode {m!r} is not part of this plan (available: {avail})",
-                code="CFG_INVALID",
-            )
-
-    run_mk_rel = f".solouvm/runs/{plan.run_id}/run.mk"
-    targets = [f"build/{m}" for m in selected_modes] if modes else ["build"]
-    n_jobs = provider.launcher.jobs(jobs or config.regress.jobs)
-    make_vars = _make_assigns(provider.launcher.make_vars(plan))
-    make_cmd = ["make", "-f", run_mk_rel, "-k", f"-j{n_jobs}", *make_vars, *targets]
+    eff_files = files if files is not None else collect_project_files(config)
 
     if dry_run:
+        if not _skip_gen:
+            gen_res = gen(
+                config=config,
+                plan=plan,
+                files=eff_files,
+                provider=provider,
+                rebuild=rebuild,
+                _run_hooks=False,
+            )
+            manifest = list(gen_res["manifest"])  # type: ignore[arg-type]
+        else:
+            manifest = _gen_manifest(root, plan.run_id, plan.builds, config=config)
+        for m in selected_modes:
+            if m not in plan.builds:
+                avail = ", ".join(sorted(plan.builds))
+                raise ConfigError(
+                    f"build mode {m!r} is not part of this plan (available: {avail})",
+                    code="CFG_INVALID",
+                )
+        run_mk_rel = f".solouvm/runs/{plan.run_id}/run.mk"
+        targets = [f"build/{m}" for m in selected_modes] if modes else ["build"]
+        n_jobs = provider.launcher.jobs(jobs or config.regress.jobs)
+        make_vars = _make_assigns(provider.launcher.make_vars(plan))
+        make_cmd = ["make", "-f", run_mk_rel, "-k", f"-j{n_jobs}", *make_vars, *targets]
         return {
             "run_id": plan.run_id,
             "dry_run": True,
@@ -408,23 +997,131 @@ def build(
             "commands": [shlex.join(make_cmd)],
         }
 
-    _push_generated(config, provider, manifest)
-    rc, build_out = provider.transport.exec_output(make_cmd, cwd=".", check=False)
-    if build_out.strip() and ui.verbosity() >= 1 and not ui.is_json_mode():
-        ui.info(build_out.rstrip())
-    _check_build_outputs(
-        config=config,
-        plan=plan,
-        provider=provider,
-        backend=backend,
-        modes=selected_modes,
-    )
-    if rc != 0:
-        raise BuildError(
-            f"make build exited with code {rc}",
-            code="BUILD_FAILED",
-            hint=f"check logs under .solouvm/build/ for run {plan.run_id}",
-        )
+    eff_verbose = ui.verbosity() if verbose is None else max(verbose, ui.verbosity())
+    stream_logs = (ui.is_tty() or eff_verbose >= 1) and not ui.is_json_mode() and not ui.is_quiet()
+    n_jobs = provider.launcher.jobs(jobs or config.regress.jobs)
+    total_stages = 2 if _skip_gen else 3
+
+    with ui.live_runner(f"build {plan.run_id}") as live:
+        if not _skip_gen:
+            _run_gen_and_push_stages(
+                config=config,
+                plan=plan,
+                files=eff_files,
+                provider=provider,
+                rebuild=rebuild,
+                total_stages=total_stages,
+                emit_json_events=True,
+            )
+        else:
+            manifest = _gen_manifest(root, plan.run_id, plan.builds, config=config)
+            push_start = _format_push_detail(provider, len(manifest), verb="uploading")
+            with _pipeline_stage(
+                "push",
+                push_start,
+                index=1,
+                total=total_stages,
+                run_id=plan.run_id,
+                emit_json_events=True,
+            ) as st_push:
+                hooks.run_hook(
+                    phase="pre",
+                    stage="push",
+                    root=root,
+                    config=config,
+                    plan=plan,
+                    provider=provider,
+                    run_id=plan.run_id,
+                    files=eff_files,
+                    extra={"manifest": manifest},
+                    emit_json_events=True,
+                )
+                _push_generated(config, provider, manifest)
+                hooks.run_hook(
+                    phase="post",
+                    stage="push",
+                    root=root,
+                    config=config,
+                    plan=plan,
+                    provider=provider,
+                    run_id=plan.run_id,
+                    files=eff_files,
+                    extra={"manifest": manifest},
+                    emit_json_events=True,
+                )
+                st_push["detail"] = _format_push_detail(provider, len(manifest), verb="uploaded")
+
+        for m in selected_modes:
+            if m not in plan.builds:
+                avail = ", ".join(sorted(plan.builds))
+                raise ConfigError(
+                    f"build mode {m!r} is not part of this plan (available: {avail})",
+                    code="CFG_INVALID",
+                )
+
+        targets = [f"build/{m}" for m in selected_modes] if modes else ["build"]
+        modes_label = _format_modes_label(selected_modes)
+        with _pipeline_stage(
+            "build",
+            f"compiling {modes_label}",
+            index=total_stages,
+            total=total_stages,
+            run_id=plan.run_id,
+            emit_json_events=True,
+        ) as st_build:
+            hooks.run_hook(
+                phase="pre",
+                stage="build",
+                root=root,
+                config=config,
+                plan=plan,
+                provider=provider,
+                run_id=plan.run_id,
+                files=eff_files,
+                extra={"modes": selected_modes},
+                emit_json_events=True,
+            )
+            rc, _stopped, all_cached = _run_build_phase(
+                config=config,
+                plan=plan,
+                provider=provider,
+                modes=selected_modes,
+                make_targets=targets,
+                n_jobs=n_jobs,
+                live=live,
+                stream_logs=stream_logs,
+                prefix_always=False,
+                keep_launch_pid=False,
+            )
+            _check_build_outputs(
+                config=config,
+                plan=plan,
+                provider=provider,
+                backend=backend,
+                modes=selected_modes,
+            )
+            if rc != 0:
+                raise BuildError(
+                    f"make build exited with code {rc}",
+                    code="BUILD_FAILED",
+                    hint=f"check logs under .solouvm/build/ for run {plan.run_id}",
+                )
+            hooks.run_hook(
+                phase="post",
+                stage="build",
+                root=root,
+                config=config,
+                plan=plan,
+                provider=provider,
+                run_id=plan.run_id,
+                files=eff_files,
+                extra={"modes": selected_modes, "all_cached": all_cached, "build_rc": rc},
+                emit_json_events=True,
+            )
+            st_build["detail"] = (
+                f"cached {modes_label} (reused)" if all_cached else f"compiled {modes_label}"
+            )
+
     return {
         "run_id": plan.run_id,
         "builds": dict(plan.builds),
@@ -601,7 +1298,27 @@ def _launch_make(
         return True
 
     launch_cmd.extend(["--", *make_cmd])
-    proc = provider.transport.spawn(launch_cmd, cwd=".")
+    eff_verbose = max(verbose, ui.verbosity())
+    stream_logs = (ui.is_tty() or eff_verbose >= 1) and not ui.is_json_mode() and not ui.is_quiet()
+    poll_interval = 0.15 if isinstance(provider.transport, LocalTransport) else 1.0
+
+    build_monitor: _BuildMonitor | None = None
+    if any(t == "regress" or t == "build" or t.startswith("build/") for t in targets):
+        mon_modes = sorted({j.build for j in plan.jobs} or set(plan.builds))
+        build_monitor = _BuildMonitor(
+            config=config,
+            plan=plan,
+            provider=provider,
+            modes=mon_modes,
+            stream_logs=stream_logs,
+            prefix_always=True,
+        )
+
+    sim_tailer = _LogTailer(provider.transport, Path(config.root))
+    sim_line_counts: dict[str, int] = {}
+    sim_flushed: set[tuple[str, int]] = set()
+    single_job = len(plan.jobs) == 1
+
     last_snapshot: tuple[int, int, int] | None = None
     printed_jobs: set[str] = set()
     stopped_early = False
@@ -613,6 +1330,33 @@ def _launch_make(
         cases_by_name = {c.name: c for c in collect_cases(config)}
         jobs_by_id = {j.job_id: j for j in plan.jobs}
         backend = _backend_for(config)
+
+    def _drain_sim_logs(
+        live: ui.LiveRunner,
+        facts_map: dict[str, dict[str, object]],
+        *,
+        force_flush: bool = False,
+    ) -> None:
+        if not stream_logs:
+            return
+        for job in plan.jobs:
+            jid = job.job_id
+            info = facts_map.get(jid)
+            if info is None:
+                continue
+            try_val = int(info["try"])  # type: ignore[arg-type]
+            key = (jid, try_val)
+            if key in sim_flushed:
+                continue
+            done_now = info["state"] != "running" or force_flush
+            log_rel = f"{job.dir}/try{try_val}/sim.log"
+            new_lines = sim_tailer.drain(log_rel, flush=done_now)
+            if new_lines:
+                sim_line_counts[jid] = sim_line_counts.get(jid, 0) + len(new_lines)
+                prefix = "" if single_job else f"[{jid}] "
+                live.log_batch([f"{prefix}{line}" for line in new_lines])
+            if done_now:
+                sim_flushed.add(key)
 
     def _emit_finished_delta(facts_map: dict[str, dict[str, object]]) -> None:
         for job in plan.jobs:
@@ -634,11 +1378,29 @@ def _launch_make(
                 )
             elif not ui.is_tty() and not ui.is_quiet():
                 ui.info(f"[{plan.run_id}] {jid} try{info['try']} finished (rc={info['rc']})")
-            if verbose >= 1 and not ui.is_json_mode():
-                log_rel = f"{job.dir}/try{info['try']}/sim.log"
-                if provider.transport.exists(log_rel):
-                    for _, line in provider.transport.read_lines(log_rel):
-                        ui.info(f"  [{jid}] {line}")
+
+    def _format_sim_footer(
+        facts_map: dict[str, dict[str, object]],
+        snap: dict[str, object],
+    ) -> str:
+        if (
+            build_monitor is not None
+            and not build_monitor.all_done
+            and snap["done"] == 0
+            and snap["running"] == 0
+        ):
+            return build_monitor.footer_text()
+        if single_job:
+            j0 = plan.jobs[0]
+            info = facts_map.get(j0.job_id)
+            state = str(info["state"]) if info is not None else "queued"
+            nlines = sim_line_counts.get(j0.job_id, 0)
+            return f"sim {j0.job_id}: {state} ({nlines} lines)"
+        return (
+            f"sim {snap['done']}/{snap['total']} done | "
+            f"running {snap['running']} | queued {snap['queued']} | "
+            f"pass~{snap['passed_approx']} fail~{snap['failed_approx']}"
+        )
 
     def _update_online_judgments(facts_objs: dict[str, Facts]) -> None:
         if cases_by_name is None or jobs_by_id is None:
@@ -672,90 +1434,101 @@ def _launch_make(
             judged_cache[cache_key] = verdict.status
 
     facts_pattern = f".solouvm/runs/{plan.run_id}/*/try*/job.facts"
-    try:
-        while proc.poll() is None:
-            poll_timeout: float | None = None
-            if eff_deadline is not None:
-                remaining = eff_deadline - time.monotonic()
-                if remaining <= 0:
-                    ui.warning(
-                        f"regression budget ({budget_desc}) exceeded; stopping run {plan.run_id}"
-                    )
-                    stopped_early = True
-                    break
-                poll_timeout = max(0.05, remaining)
+    init_footer = (
+        build_monitor.footer_text() if build_monitor is not None else f"running {plan.run_id}"
+    )
+    budget_msg = f"regression budget ({budget_desc}) exceeded; stopping run {plan.run_id}"
+    with ui.live_runner(init_footer) as live:
+        if build_monitor is not None:
+            build_monitor.announce_cached(live)
+        proc = provider.transport.spawn(launch_cmd, cwd=".")
+        try:
+            while proc.poll() is None:
+                poll_timeout: float | None = None
+                if eff_deadline is not None:
+                    remaining = eff_deadline - time.monotonic()
+                    if remaining <= 0:
+                        ui.warning(budget_msg)
+                        stopped_early = True
+                        break
+                    poll_timeout = max(0.05, remaining)
 
-            try:
-                raw_facts = _read_many_with_timeout(
-                    provider.transport,
-                    facts_pattern,
-                    timeout=poll_timeout,
+                try:
+                    raw_facts = _read_many_with_timeout(
+                        provider.transport,
+                        facts_pattern,
+                        timeout=poll_timeout,
+                    )
+                except InfraError:
+                    if eff_deadline is not None and time.monotonic() >= eff_deadline:
+                        ui.warning(budget_msg)
+                        stopped_early = True
+                        break
+                    raise
+
+                if build_monitor is not None:
+                    build_monitor.poll(live, flush=False)
+
+                facts_objs = _parse_facts_objects(raw_facts, run_id=plan.run_id)
+                facts_map = {jid: _facts_info(facts_obj) for jid, facts_obj in facts_objs.items()}
+                _drain_sim_logs(live, facts_map, force_flush=False)
+                _emit_finished_delta(facts_map)
+                if max_fail is not None:
+                    _update_online_judgments(facts_objs)
+                snap = _live_summary(
+                    plan,
+                    facts_map,
+                    judged_statuses=judged_cache if max_fail is not None else None,
                 )
-            except InfraError:
-                if eff_deadline is not None and time.monotonic() >= eff_deadline:
-                    ui.warning(
-                        f"regression budget ({budget_desc}) exceeded; stopping run {plan.run_id}"
-                    )
+                live.update(_format_sim_footer(facts_map, snap))
+                curr = (int(snap["done"]), int(snap["running"]), int(snap["queued"]))  # type: ignore[arg-type]
+                if on_progress is not None and curr != last_snapshot:
+                    on_progress(snap)
+                elif curr != last_snapshot and ui.is_json_mode():
+                    output.emit_event("progress", run_id=plan.run_id, **snap)
+                last_snapshot = curr
+
+                if max_fail is not None and int(snap["failed_approx"]) >= max_fail:  # type: ignore[arg-type]
+                    ui.warning(f"max_fail ({max_fail}) reached; stopping run {plan.run_id}")
                     stopped_early = True
                     break
-                raise
+                if eff_deadline is not None:
+                    remaining = eff_deadline - time.monotonic()
+                    if remaining <= 0:
+                        ui.warning(budget_msg)
+                        stopped_early = True
+                        break
+                    time.sleep(min(poll_interval, remaining))
+                else:
+                    time.sleep(poll_interval)
 
-            facts_objs = _parse_facts_objects(raw_facts, run_id=plan.run_id)
-            facts_map = {jid: _facts_info(facts_obj) for jid, facts_obj in facts_objs.items()}
-            _emit_finished_delta(facts_map)
-            if max_fail is not None:
-                _update_online_judgments(facts_objs)
-            snap = _live_summary(
-                plan,
-                facts_map,
-                judged_statuses=judged_cache if max_fail is not None else None,
-            )
-            curr = (int(snap["done"]), int(snap["running"]), int(snap["queued"]))  # type: ignore[arg-type]
-            if on_progress is not None and curr != last_snapshot:
-                on_progress(snap)
-            elif curr != last_snapshot and ui.is_json_mode():
-                output.emit_event("progress", run_id=plan.run_id, **snap)
-            last_snapshot = curr
-
-            if max_fail is not None and int(snap["failed_approx"]) >= max_fail:  # type: ignore[arg-type]
-                ui.warning(f"max_fail ({max_fail}) reached; stopping run {plan.run_id}")
-                stopped_early = True
-                break
-            if eff_deadline is not None:
-                remaining = eff_deadline - time.monotonic()
-                if remaining <= 0:
-                    ui.warning(
-                        f"regression budget ({budget_desc}) exceeded; stopping run {plan.run_id}"
-                    )
-                    stopped_early = True
-                    break
-                time.sleep(min(0.25, remaining))
+            if stopped_early:
+                _stop_b_processes(config=config, provider=provider, run_id=plan.run_id)
+                proc.terminate()
+                with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                    proc.wait(timeout=10)
             else:
-                time.sleep(0.25)
-
-        if stopped_early:
+                rc = proc.wait()
+                if build_monitor is not None:
+                    build_monitor.poll(live, flush=True)
+                raw_facts = provider.transport.read_many(facts_pattern)
+                final_map = _parse_facts_map(raw_facts, run_id=plan.run_id)
+                _drain_sim_logs(live, final_map, force_flush=True)
+                _emit_finished_delta(final_map)
+                if rc not in (0, 2):
+                    # make -k returns 2 on build failure; non-2 indicates launcher failure
+                    raise InfraError(
+                        f"launch.sh exited unexpectedly with code {rc}",
+                        code="PROVIDER_FAILED",
+                        hint=f"check .solouvm/runs/{plan.run_id}/launch.log",
+                    )
+        except KeyboardInterrupt:
             _stop_b_processes(config=config, provider=provider, run_id=plan.run_id)
-            proc.terminate()
+            with contextlib.suppress(OSError):
+                proc.terminate()
             with contextlib.suppress(OSError, subprocess.TimeoutExpired):
                 proc.wait(timeout=10)
-        else:
-            rc = proc.wait()
-            raw_facts = provider.transport.read_many(facts_pattern)
-            _emit_finished_delta(_parse_facts_map(raw_facts, run_id=plan.run_id))
-            if rc not in (0, 2):
-                # make -k returns 2 on build failure; non-2 indicates launcher failure
-                raise InfraError(
-                    f"launch.sh exited unexpectedly with code {rc}",
-                    code="PROVIDER_FAILED",
-                    hint=f"check .solouvm/runs/{plan.run_id}/launch.log",
-                )
-    except KeyboardInterrupt:
-        _stop_b_processes(config=config, provider=provider, run_id=plan.run_id)
-        with contextlib.suppress(OSError):
-            proc.terminate()
-        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
-            proc.wait(timeout=10)
-        raise
+            raise
 
     return stopped_early
 
@@ -841,6 +1614,7 @@ def _run_wave_on_fail(
     jobs_count: int,
     deadline: float | None = None,
     budget_label: float | None = None,
+    verbose: int = 0,
 ) -> bool:
     candidates = _wave_candidates(results, plan, config.regress.wave_on_fail)
     if not candidates:
@@ -867,7 +1641,94 @@ def _run_wave_on_fail(
         detach=False,
         deadline=deadline,
         budget_label=budget_label,
+        verbose=verbose,
     )
+
+
+def _run_stage_followup(
+    *,
+    config: Config,
+    plan: Plan,
+    provider: Provider,
+    live: ui.LiveRunner,
+    n_jobs: int,
+    wave: bool,
+    retry: int | None,
+    allow_missing: bool,
+    deadline: float | None,
+    eff_budget: float | None,
+    verbose: int,
+) -> bool:
+    """Execute retry attempts and optional wave_on_fail within Stage 4."""
+    stopped_early = False
+    results = judge_run(
+        config=config,
+        plan=plan,
+        provider=provider,
+        allow_missing=allow_missing,
+        partial=False,
+    )
+    attempt = 1
+    while True:
+        to_retry = _retry_candidates(
+            results,
+            plan,
+            config.regress.retry_on,
+            retry_override=retry,
+            attempt_num=attempt,
+        )
+        if not to_retry:
+            break
+        if deadline is not None and time.monotonic() >= deadline:
+            assert eff_budget is not None
+            ui.warning(
+                f"regression budget ({eff_budget:g}s) exceeded; stopping run {plan.run_id}"
+            )
+            return True
+        attempt += 1
+        live.update(f"retrying {len(to_retry)} job(s) (try {attempt})")
+        retry_stopped = _launch_make(
+            config=config,
+            plan=plan,
+            provider=provider,
+            jobs=n_jobs,
+            targets=[f"run/{j.job_id}" for j in to_retry],
+            try_num=attempt,
+            wave=wave,
+            detach=False,
+            deadline=deadline,
+            budget_label=eff_budget,
+            verbose=verbose,
+        )
+        if retry_stopped:
+            stopped_early = True
+        results = judge_run(
+            config=config,
+            plan=plan,
+            provider=provider,
+            allow_missing=allow_missing or stopped_early,
+            partial=stopped_early,
+        )
+        if retry_stopped:
+            return True
+
+    if not stopped_early and not wave and config.regress.wave_on_fail:
+        candidates = _wave_candidates(results, plan, config.regress.wave_on_fail)
+        if candidates:
+            live.update(f"capturing wave for {len(candidates)} failed job(s)")
+        wave_stopped = _run_wave_on_fail(
+            config=config,
+            plan=plan,
+            provider=provider,
+            results=results,
+            jobs_count=n_jobs,
+            deadline=deadline,
+            budget_label=eff_budget,
+            verbose=verbose,
+        )
+        if wave_stopped:
+            return True
+    return stopped_early
 
 
 def run_regression(
@@ -916,15 +1777,6 @@ def run_regression(
     reg_started = time.monotonic()
     deadline = (reg_started + eff_budget) if eff_budget is not None else None
     root = Path(config.root)
-    gen_res = gen(
-        config=config,
-        plan=plan,
-        files=files,
-        provider=provider,
-        rebuild=rebuild,
-    )
-    manifest = list(gen_res["manifest"])  # type: ignore[arg-type]
-
     n_jobs = provider.launcher.jobs(jobs or config.regress.jobs)
     assigns = {"TRY": "1", "WAVE": "1" if wave else "0", **provider.launcher.make_vars(plan)}
     make_cmd = [
@@ -936,7 +1788,17 @@ def run_regression(
         *_make_assigns(assigns),
         "regress",
     ]
+
     if dry_run:
+        gen_res = gen(
+            config=config,
+            plan=plan,
+            files=files,
+            provider=provider,
+            rebuild=rebuild,
+            _run_hooks=False,
+        )
+        manifest = list(gen_res["manifest"])  # type: ignore[arg-type]
         dry_payload = {
             "run_id": plan.run_id,
             "dry_run": True,
@@ -946,39 +1808,288 @@ def run_regression(
         }
         return [], dry_payload, 0
 
-    _push_generated(config, provider, manifest)
-
     if detach:
-        _launch_make(
+        _run_gen_and_push_stages(
             config=config,
             plan=plan,
+            files=files,
             provider=provider,
-            jobs=n_jobs,
-            targets=["regress"],
-            try_num=1,
-            wave=wave,
-            detach=True,
-            deadline=deadline,
-            budget_label=eff_budget,
+            rebuild=rebuild,
+            total_stages=3,
+            emit_json_events=True,
         )
+        with _pipeline_stage(
+            "run",
+            "submitting in background",
+            index=3,
+            total=3,
+            run_id=plan.run_id,
+            emit_json_events=True,
+        ) as st_run:
+            hooks.run_hook(
+                phase="pre",
+                stage="run",
+                root=root,
+                config=config,
+                plan=plan,
+                provider=provider,
+                run_id=plan.run_id,
+                files=files,
+                extra={"detach": True},
+                emit_json_events=True,
+            )
+            _launch_make(
+                config=config,
+                plan=plan,
+                provider=provider,
+                jobs=n_jobs,
+                targets=["regress"],
+                try_num=1,
+                wave=wave,
+                detach=True,
+                deadline=deadline,
+                budget_label=eff_budget,
+            )
+            st_run["detail"] = "submitted in background"
         return [], None, 0
 
+    eff_verbose = max(verbose, ui.verbosity())
+    stream_logs = (ui.is_tty() or eff_verbose >= 1) and not ui.is_json_mode() and not ui.is_quiet()
+    stopped_early = False
+
     try:
-        stopped_early = _launch_make(
-            config=config,
-            plan=plan,
-            provider=provider,
-            jobs=n_jobs,
-            targets=["regress"],
-            try_num=1,
-            wave=wave,
-            detach=False,
-            on_progress=on_progress,
-            max_fail=eff_max_fail,
-            deadline=deadline,
-            budget_label=eff_budget,
-            verbose=verbose,
-        )
+        with ui.live_runner(f"run {plan.run_id}") as live:
+            _run_gen_and_push_stages(
+                config=config,
+                plan=plan,
+                files=files,
+                provider=provider,
+                rebuild=rebuild,
+                total_stages=5,
+                emit_json_events=True,
+            )
+
+            mon_modes = sorted({j.build for j in plan.jobs} or set(plan.builds))
+            modes_label = _format_modes_label(mon_modes)
+            ok_modes: dict[str, bool] = {}
+            build_stopped = False
+            with _pipeline_stage(
+                "build",
+                f"compiling {modes_label}",
+                index=3,
+                total=5,
+                run_id=plan.run_id,
+                emit_json_events=True,
+            ) as st_build:
+                hooks.run_hook(
+                    phase="pre",
+                    stage="build",
+                    root=root,
+                    config=config,
+                    plan=plan,
+                    provider=provider,
+                    run_id=plan.run_id,
+                    files=files,
+                    extra={"modes": mon_modes},
+                    emit_json_events=True,
+                )
+                build_targets = [f"build/{m}" for m in mon_modes] if mon_modes else ["build"]
+                build_rc, build_stopped, all_cached = _run_build_phase(
+                    config=config,
+                    plan=plan,
+                    provider=provider,
+                    modes=mon_modes,
+                    make_targets=build_targets,
+                    n_jobs=n_jobs,
+                    live=live,
+                    stream_logs=stream_logs,
+                    prefix_always=True,
+                    deadline=deadline,
+                    budget_label=eff_budget,
+                    keep_launch_pid=True,
+                )
+                if not build_stopped and build_rc not in (0, 2):
+                    raise InfraError(
+                        f"launch.sh exited unexpectedly with code {build_rc}",
+                        code="PROVIDER_FAILED",
+                        hint=f"check .solouvm/runs/{plan.run_id}/launch.log",
+                    )
+                for mode in mon_modes:
+                    key = plan.builds.get(mode)
+                    ok_modes[mode] = bool(
+                        key and provider.transport.exists(f".solouvm/build/{mode}/{key}/.ok")
+                    )
+                if not build_stopped:
+                    hooks.run_hook(
+                        phase="post",
+                        stage="build",
+                        root=root,
+                        config=config,
+                        plan=plan,
+                        provider=provider,
+                        run_id=plan.run_id,
+                        files=files,
+                        extra={
+                            "build_rc": build_rc,
+                            "modes": mon_modes,
+                            "ok_modes": ok_modes,
+                            "all_cached": all_cached,
+                        },
+                        emit_json_events=True,
+                    )
+                    if all_cached:
+                        st_build["detail"] = f"cached {modes_label} (reused)"
+                    elif build_rc == 0:
+                        st_build["detail"] = f"compiled {modes_label}"
+                    else:
+                        st_build["detail"] = f"failed {modes_label} (rc={build_rc})"
+                    st_build["ok"] = build_rc == 0
+                else:
+                    st_build["detail"] = "stopped (budget exceeded)"
+                    st_build["ok"] = False
+
+            if build_stopped:
+                stopped_early = True
+            else:
+                runnable_jobs = [j for j in plan.jobs if ok_modes.get(j.build, False)]
+                run_desc = _plural_jobs(len(runnable_jobs))
+                with _pipeline_stage(
+                    "run",
+                    f"running {run_desc} (j={n_jobs})",
+                    index=4,
+                    total=5,
+                    run_id=plan.run_id,
+                    emit_json_events=True,
+                ) as st_run:
+                    if not runnable_jobs:
+                        st_run["detail"] = "skipped (compile failed)"
+                        st_run["ok"] = False
+                    else:
+                        with contextlib.suppress(Exception):
+                            _rm_path(
+                                provider,
+                                root,
+                                f".solouvm/runs/{plan.run_id}/launch.pid",
+                                local_only=False,
+                            )
+                        hooks.run_hook(
+                            phase="pre",
+                            stage="run",
+                            root=root,
+                            config=config,
+                            plan=plan,
+                            provider=provider,
+                            run_id=plan.run_id,
+                            files=files,
+                            extra={"jobs": [j.job_id for j in runnable_jobs]},
+                            emit_json_events=True,
+                        )
+                        stopped_early = _launch_make(
+                            config=config,
+                            plan=plan,
+                            provider=provider,
+                            jobs=n_jobs,
+                            targets=[f"run/{j.job_id}" for j in runnable_jobs],
+                            try_num=1,
+                            wave=wave,
+                            detach=False,
+                            on_progress=on_progress,
+                            max_fail=eff_max_fail,
+                            deadline=deadline,
+                            budget_label=eff_budget,
+                            verbose=verbose,
+                        )
+                        has_retry = (
+                            (retry > 0)
+                            if retry is not None
+                            else any(j.retry > 0 for j in plan.jobs)
+                        )
+                        has_wave = (not wave) and bool(config.regress.wave_on_fail)
+                        if not stopped_early and (has_retry or has_wave):
+                            stopped_early = _run_stage_followup(
+                                config=config,
+                                plan=plan,
+                                provider=provider,
+                                live=live,
+                                n_jobs=n_jobs,
+                                wave=wave,
+                                retry=retry,
+                                allow_missing=allow_missing,
+                                deadline=deadline,
+                                eff_budget=eff_budget,
+                                verbose=verbose,
+                            )
+                        if not stopped_early:
+                            hooks.run_hook(
+                                phase="post",
+                                stage="run",
+                                root=root,
+                                config=config,
+                                plan=plan,
+                                provider=provider,
+                                run_id=plan.run_id,
+                                files=files,
+                                extra={"stopped_early": stopped_early},
+                                emit_json_events=True,
+                            )
+                            st_run["detail"] = f"finished {run_desc} (j={n_jobs})"
+                        else:
+                            st_run["detail"] = "stopped early"
+                            st_run["ok"] = False
+
+            with _pipeline_stage(
+                "judge",
+                f"evaluating {_plural_jobs(len(plan.jobs))}",
+                index=5,
+                total=5,
+                run_id=plan.run_id,
+                emit_json_events=True,
+            ) as st_judge:
+                hooks.run_hook(
+                    phase="pre",
+                    stage="judge",
+                    root=root,
+                    config=config,
+                    plan=plan,
+                    provider=provider,
+                    run_id=plan.run_id,
+                    files=files,
+                    emit_json_events=True,
+                )
+                results = judge_run(
+                    config=config,
+                    plan=plan,
+                    provider=provider,
+                    allow_missing=allow_missing or stopped_early,
+                    partial=stopped_early,
+                )
+                payload = write_results(
+                    run_dir(root, plan.run_id),
+                    results,
+                    run_id=plan.run_id,
+                    partial=stopped_early,
+                    judged_at=datetime.now().astimezone(),
+                    config=config,
+                )
+                exit_code = judge_exit_code(results)
+                hooks.run_hook(
+                    phase="post",
+                    stage="judge",
+                    root=root,
+                    config=config,
+                    plan=plan,
+                    provider=provider,
+                    run_id=plan.run_id,
+                    files=files,
+                    results=results,
+                    payload=payload,
+                    exit_code=exit_code,
+                    emit_json_events=True,
+                )
+                s_map = payload["summary"]
+                assert isinstance(s_map, dict)
+                st_judge["detail"] = _format_judge_detail(s_map)
+                st_judge["ok"] = exit_code == 0
     except KeyboardInterrupt:
         partial_results = judge_run(
             config=config,
@@ -997,109 +2108,9 @@ def run_regression(
         )
         return partial_results, payload, 130
 
-    results = judge_run(
-        config=config,
-        plan=plan,
-        provider=provider,
-        allow_missing=allow_missing or stopped_early,
-        partial=stopped_early,
-    )
-
-    if not stopped_early:
-        attempt = 1
-        while True:
-            to_retry = _retry_candidates(
-                results,
-                plan,
-                config.regress.retry_on,
-                retry_override=retry,
-                attempt_num=attempt,
-            )
-            if not to_retry:
-                break
-            if deadline is not None and time.monotonic() >= deadline:
-                assert eff_budget is not None
-                ui.warning(
-                    f"regression budget ({eff_budget:g}s) exceeded; stopping run {plan.run_id}"
-                )
-                stopped_early = True
-                break
-            attempt += 1
-            try:
-                retry_stopped = _launch_make(
-                    config=config,
-                    plan=plan,
-                    provider=provider,
-                    jobs=n_jobs,
-                    targets=[f"run/{j.job_id}" for j in to_retry],
-                    try_num=attempt,
-                    wave=wave,
-                    detach=False,
-                    deadline=deadline,
-                    budget_label=eff_budget,
-                    verbose=verbose,
-                )
-            except KeyboardInterrupt:
-                partial_results = judge_run(
-                    config=config,
-                    plan=plan,
-                    provider=provider,
-                    partial=True,
-                    allow_missing=True,
-                )
-                payload = write_results(
-                    run_dir(root, plan.run_id),
-                    partial_results,
-                    run_id=plan.run_id,
-                    partial=True,
-                    judged_at=datetime.now().astimezone(),
-                    config=config,
-                )
-                return partial_results, payload, 130
-            if retry_stopped:
-                stopped_early = True
-            results = judge_run(
-                config=config,
-                plan=plan,
-                provider=provider,
-                allow_missing=allow_missing or stopped_early,
-                partial=stopped_early,
-            )
-            if retry_stopped:
-                break
-
-        if not stopped_early and not wave and config.regress.wave_on_fail:
-            wave_stopped = _run_wave_on_fail(
-                config=config,
-                plan=plan,
-                provider=provider,
-                results=results,
-                jobs_count=n_jobs,
-                deadline=deadline,
-                budget_label=eff_budget,
-            )
-            if wave_stopped:
-                stopped_early = True
-            results = judge_run(
-                config=config,
-                plan=plan,
-                provider=provider,
-                allow_missing=allow_missing or stopped_early,
-                partial=stopped_early,
-            )
-
-    payload = write_results(
-        run_dir(root, plan.run_id),
-        results,
-        run_id=plan.run_id,
-        partial=stopped_early,
-        judged_at=datetime.now().astimezone(),
-        config=config,
-    )
     if not ui.is_json_mode():
-        summary_text = render_text(payload)
-        ui.summary(summary_text)
-    return results, payload, judge_exit_code(results)
+        ui.print_run_summary(payload, fallback_text=render_text(payload))
+    return results, payload, exit_code
 
 
 def run(

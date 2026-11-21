@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
+import json
+import os
+import pty
+import select
 import stat
+import subprocess
+import sys
 import textwrap
 import threading
 import time
@@ -10,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from solouvm import ui
 from solouvm.collect import collect_cases, collect_files, load_filelist
 from solouvm.config import load_config
 from solouvm.errors import BuildError, ConfigError, InfraError
@@ -724,3 +732,300 @@ def test_polling_read_many_caps_timeout_to_budget_and_handles_timeout(tmp_path: 
     assert payload is not None and payload["partial"] is True
     assert results[0].status == "incomplete"
     assert any(t is not None and t <= 0.3 for t in recorded_timeouts)
+
+
+def test_build_live_log_streaming_cached_multimode_json_and_quiet(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _setup_project(tmp_path / "proj")
+    comp_sh = root / "comp_multi.sh"
+    _write(
+        comp_sh,
+        """\
+        #!/usr/bin/env bash
+        echo "COMPILE_LINE_1 [DUT]"
+        sleep 0.12
+        echo "COMPILE_LINE_2 ok"
+        touch simv
+        """,
+    )
+    comp_sh.chmod(0o755)
+    _write(
+        root / "solouvm.conf.py",
+        f"""\
+        CFG = {{
+            "simulator": "fake",
+            "top": "tb_top",
+            "builds": {{
+                "default": {{}},
+                "cov": {{"coverage": True}},
+            }},
+            "sim": {{"build": "bash {comp_sh}"}},
+        }}
+        """,
+    )
+    _write(
+        root / "case.py",
+        """\
+        from solouvm import Case
+        CASES = [
+            Case(name="c1", build="default", expect=[]),
+            Case(name="c2", build="cov", expect=[]),
+        ]
+        """,
+    )
+
+    try:
+        # 1. Single-mode build with verbose=1: raw build.log lines, no [build/default] log prefix
+        cfg, files, plan1, prov = _make_plan(root, "r-b-single")
+        ui.setup(json_mode=False, quiet=False, verbose=1)
+        build(config=cfg, plan=plan1, provider=prov, files=files, modes=["default"], verbose=1)
+        out1 = capsys.readouterr().out
+        assert "COMPILE_LINE_1 [DUT]" in out1
+        assert "COMPILE_LINE_2 ok" in out1
+        assert "[build/default] COMPILE_LINE_1" not in out1
+        assert "[build/default] ok" in out1
+
+        # 2. Cached mode prints cached status and does NOT dump stale COMPILE_LINE_1
+        cfg2, files2, plan2, prov2 = _make_plan(root, "r-b-cached")
+        build(config=cfg2, plan=plan2, provider=prov2, files=files2, modes=["default"], verbose=1)
+        out2 = capsys.readouterr().out
+        assert f"[build/default] cached ({plan2.builds['default']})" in out2
+        assert "COMPILE_LINE_1" not in out2
+
+        # 3. Multi-mode build (default cached + cov building) prefixes live lines with [build/cov]
+        cfg3, files3, plan3, prov3 = _make_plan(root, "r-b-multi")
+        build(config=cfg3, plan=plan3, provider=prov3, files=files3, verbose=1)
+        out3 = capsys.readouterr().out
+        assert f"[build/default] cached ({plan3.builds['default']})" in out3
+        assert "[build/cov] COMPILE_LINE_1 [DUT]" in out3
+        assert "[build/cov] ok" in out3
+
+        # 4. --json mode emits build_cached, build_start, and build_done JSONL events
+        cfg4, files4, plan4, prov4 = _make_plan(root, "r-b-json")
+        ui.setup(json_mode=True, quiet=False, verbose=0)
+        build(config=cfg4, plan=plan4, provider=prov4, files=files4, rebuild=True)
+        events = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
+        ev_names = {(e["event"], e.get("mode")) for e in events}
+        assert ("build_start", "default") in ev_names
+        assert ("build_done", "default") in ev_names
+        assert ("build_start", "cov") in ev_names
+        assert ("build_done", "cov") in ev_names
+        stages_seen = [
+            (e["event"], e.get("stage"))
+            for e in events
+            if str(e["event"]).startswith("stage_")
+        ]
+        assert stages_seen == [
+            ("stage_start", "gen"),
+            ("stage_done", "gen"),
+            ("stage_start", "push"),
+            ("stage_done", "push"),
+            ("stage_start", "build"),
+            ("stage_done", "build"),
+        ]
+
+        # Cache hit under --json emits build_cached
+        cfg5, files5, plan5, prov5 = _make_plan(root, "r-b-json-cache")
+        build(config=cfg5, plan=plan5, provider=prov5, files=files5, modes=["default"])
+        cache_events = [
+            json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()
+        ]
+        assert any(e["event"] == "build_cached" and e["mode"] == "default" for e in cache_events)
+
+        # 5. --quiet suppresses build live output
+        cfg6, files6, plan6, prov6 = _make_plan(root, "r-b-quiet")
+        ui.setup(json_mode=False, quiet=True, verbose=1)
+        build(
+            config=cfg6,
+            plan=plan6,
+            provider=prov6,
+            files=files6,
+            rebuild=True,
+            modes=["default"],
+        )
+        assert capsys.readouterr().out == ""
+    finally:
+        ui.reset()
+
+
+def test_run_regression_streams_build_and_sim_logs_without_duplication(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _setup_project(tmp_path / "proj")
+    comp_sh = root / "comp_stream.sh"
+    sim_sh = root / "sim_stream.sh"
+    _write(
+        comp_sh,
+        """\
+        #!/usr/bin/env bash
+        echo "STREAM_BUILD_ALPHA"
+        sleep 0.15
+        echo "STREAM_BUILD_BETA"
+        touch simv
+        """,
+    )
+    _write(
+        sim_sh,
+        """\
+        #!/usr/bin/env bash
+        echo "STREAM_SIM_ONE [UVM_INFO]"
+        sleep 0.15
+        echo "STREAM_SIM_TWO"
+        echo "--- UVM Report Summary ---"
+        echo "** Report counts by severity"
+        echo "UVM_INFO :    4"
+        echo "UVM_WARNING :    0"
+        echo "UVM_ERROR :    0"
+        echo "UVM_FATAL :    0"
+        echo "sim time: 50000ns"
+        """,
+    )
+    comp_sh.chmod(0o755)
+    sim_sh.chmod(0o755)
+    _write(
+        root / "solouvm.conf.py",
+        f"""\
+        CFG = {{
+            "simulator": "fake",
+            "top": "tb_top",
+            "sim": {{"build": "bash {comp_sh}", "run": "bash {sim_sh}"}},
+        }}
+        """,
+    )
+    _write(
+        root / "case.py",
+        'from solouvm import Case\nCASES = [Case(name="s1", expect=[])]\n',
+    )
+
+    try:
+        cfg, files, plan, prov = _make_plan(root, "r-stream-all")
+        ui.setup(json_mode=False, quiet=False, verbose=1)
+        _res, _payload, code = run_regression(
+            config=cfg, plan=plan, provider=prov, files=files, verbose=1
+        )
+        assert code == 0
+        out = capsys.readouterr().out
+        assert out.count("[build/default] STREAM_BUILD_ALPHA") == 1
+        assert out.count("[build/default] STREAM_BUILD_BETA") == 1
+        assert out.count("STREAM_SIM_ONE [UVM_INFO]") == 1
+        assert out.count("STREAM_SIM_TWO") == 1
+    finally:
+        ui.reset()
+
+
+def test_pty_live_build_and_regress_with_rich(tmp_path: Path) -> None:
+    proj = _setup_project(tmp_path / "proj")
+    comp_sh = proj / "pty_build.sh"
+    sim_sh = proj / "pty_sim.sh"
+    _write(
+        comp_sh,
+        """\
+        #!/usr/bin/env bash
+        echo "PTY_BUILD_LINE_1"
+        sleep 0.1
+        echo "PTY_BUILD_LINE_2"
+        touch simv
+        """,
+    )
+    _write(
+        sim_sh,
+        """\
+        #!/usr/bin/env bash
+        echo "PTY_SIM_LINE_1 [AXI_MON]"
+        sleep 0.1
+        echo "--- UVM Report Summary ---"
+        echo "** Report counts by severity"
+        echo "UVM_INFO :    4"
+        echo "UVM_WARNING :    0"
+        echo "UVM_ERROR :    0"
+        echo "UVM_FATAL :    0"
+        echo "sim time: 50000ns"
+        """,
+    )
+    comp_sh.chmod(0o755)
+    sim_sh.chmod(0o755)
+    _write(
+        proj / "solouvm.conf.py",
+        f"""\
+        CFG = {{
+            "simulator": "fake",
+            "top": "tb_top",
+            "sim": {{"build": "bash {comp_sh}", "run": "bash {sim_sh}"}},
+        }}
+        """,
+    )
+    _write(
+        proj / "case.py",
+        'from solouvm import Case\nCASES = [Case(name="p1", expect=[])]\n',
+    )
+
+    repo_root = Path(__file__).resolve().parent.parent
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(repo_root),
+        "TERM": "xterm-256color",
+        "COLUMNS": "120",
+        "LINES": "40",
+    }
+
+    def _run_in_pty(*cli_args: str) -> tuple[int, str]:
+        master, slave = pty.openpty()
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "solouvm", "-c", str(proj), *cli_args],
+            cwd=proj,
+            env=env,
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            close_fds=True,
+        )
+        os.close(slave)
+        chunks: list[bytes] = []
+        try:
+            while True:
+                r, _, _ = select.select([master], [], [], 0.2)
+                if r:
+                    try:
+                        data = os.read(master, 8192)
+                    except OSError:
+                        break
+                    if not data:
+                        break
+                    chunks.append(data)
+                elif proc.poll() is not None:
+                    while select.select([master], [], [], 0.05)[0]:
+                        try:
+                            data = os.read(master, 8192)
+                        except OSError:
+                            break
+                        if not data:
+                            break
+                        chunks.append(data)
+                    break
+            rc = proc.wait(timeout=30)
+        finally:
+            with contextlib.suppress(OSError):
+                os.close(master)
+        return rc, b"".join(chunks).decode("utf-8", "replace")
+
+    import re
+
+    ansi_re = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+    b_rc, b_out = _run_in_pty("build")
+    assert b_rc == 0, b_out
+    assert "PTY_BUILD_LINE_1" in b_out
+    assert "PTY_BUILD_LINE_2" in b_out
+    b_plain = ansi_re.sub("", b_out)
+    assert "✓ [1/3] Generate" in b_plain
+    assert "✓ [2/3] Sync" in b_plain
+    assert "✓ [3/3] Compile" in b_plain
+
+    r_rc, r_out = _run_in_pty("regress")
+    assert r_rc == 0, r_out
+    assert "[build/default] cached" in r_out
+    assert "PTY_SIM_LINE_1 [AXI_MON]" in r_out
+    r_plain = ansi_re.sub("", r_out)
+    for idx, st in enumerate(("Generate", "Sync", "Compile", "Simulate", "Judge"), 1):
+        assert f"✓ [{idx}/5] {st}" in r_plain

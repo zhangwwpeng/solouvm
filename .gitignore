@@ -11,6 +11,12 @@ examples/demo/.solouvm/
 examples/demo/filelist.f
 examples/demo/Makefile
 
+# generated artifacts of the permanent smoke_test project
+smoke_test/.solouvm/
+smoke_test/filelist.f
+smoke_test/results.json
+smoke_test/results.txt
+
 # local runs
 /.solouvm/
 /filelist.f

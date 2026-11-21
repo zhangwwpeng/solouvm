@@ -116,6 +116,10 @@ class RecordError(SolouvmError):
     code = "RECORD_INVALID"
 
 
+class HookError(SolouvmError):
+    code = "HOOK_FAILED"
+
+
 def format_error(err: SolouvmError) -> str:
     """Human-readable error text: ``solouvm: error: ...`` plus an optional hint line."""
     text = f"solouvm: error: {err}"
