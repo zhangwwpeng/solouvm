@@ -48,6 +48,7 @@ solouvm [全局参数] <命令> [命令参数]
 | `--seed N` / `--seeds SPEC` | 覆盖种子；`SPEC` 如 `"1-5,42"` 或 `"random:10"` |
 | `--build MODE` | 只选使用该编译配置的 case |
 | `--shard I/N` | 稳定地把 job 分成 N 份，只取第 I 份（1 起计）（T-16，M2） |
+| `--shard-seed KEY` | 分片展开 `random:N` 时的共享随机序列标识（未传时回退 `SOLOUVM_SHARD_SEED` 环境变量或 `run_id`） |
 | `--allow-empty` | 选择结果为空时返回 0 而不是 2（T-17） |
 
 选择顺序：先按 `--stage` 过滤，再按 `--case`、`--tag`、`--exclude-tag`、`--build`，然后展开种子成 job，最后分片。`--case` 选中 `planned` 的 case 时报错，选中 `deprecated` 的 case 时照跑并警告（config.md §5.1）。
@@ -350,7 +351,8 @@ solouvm wave burst__4417 --signals tb_top.dut.araddr,tb_top.dut.arvalid --from 1
 |------|------|
 | `--run RUN_ID` | 默认 `latest` |
 | `--format text\|json\|junit\|html` | 可重复；默认 `text` |
-| `--compare RUN_ID` | 与另一轮对比：新增失败、新修复、仍失败（K-06） |
+| `--compare RUN_ID` | 与另一轮对比：新增失败、新修复、仍失败（K-06）；默认按包含已接受分诊结论的最终 `status` 比较 |
+| `--compare-mode status\|judged` | 指定 `--compare` 使用最终状态 `status`（默认）还是机械判定 `judged_status` |
 | `-o PATH` | 输出位置 |
 
 ### `solouvm history`（M2）
@@ -545,6 +547,19 @@ EOF
 ### `solouvm help TOPIC`（M4）
 
 输出内置的离线文档（Z-12），内容与 `doc/` 一致，例如 `solouvm help verdict`。不带参数时列出主题。
+
+### `solouvm update`
+
+联网从 Git 仓库更新当前 `solouvm` CLI 安装（调用仓库根目录的 `install.sh`；离线场景请直接获取新版目录后执行 `./install.sh`）。受 `--role triage` 禁止。
+
+| 参数 | 说明 |
+|------|------|
+| `--repo URL` | Git 仓库地址（默认：`https://github.com/zhangwwpeng/solouvm`） |
+| `--ref REF` | 指定分支、标签或提交号 |
+| `--user` / `--system` | 指定更新为用户级（`~/.local`）或系统级（`/usr/local`）；不传时优先沿用 `.install-meta` 记录 |
+| `--prefix DIR` | 安装或更新到自定义前缀目录 |
+| `--python PATH` | 指定目标 Python >= 3.10 解释器路径 |
+| `--dry-run` | 只打印计划执行的 git 与安装命令，不实际下载或修改安装 |
 
 ## 8. 手动模式
 

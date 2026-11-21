@@ -80,7 +80,7 @@ Python 包结构如下，括号内为主要承担的需求区。
 
 ```text
 solouvm/
-  __init__.py          公开 API：Case、Bug、Todo、Log、Note、Expect、Waiver
+  __init__.py          公开 API：Case、Bug、Todo、Log、Note、Expect、Waiver、Triage
   uvm.py               公开 API：Env、Agent、Interface、Signal、Field（转引自 uvmgen.spec）
   cli.py               参数解析、命令分发、退出码；不含业务逻辑            (L)
   ui.py                终端输出：rich 的唯一入口；非终端与 --json 时退化为纯文本 (N-22)
@@ -88,7 +88,7 @@ solouvm/
   output.py            人类输出与 --json 外壳、截断、next 建议、错误码        (N-17 ~ N-21)
   roles.py             角色与命令白名单                                      (AI-10)
   errors.py            异常层级与退出码映射                                  (N-07, N-09)
-  model.py             纯数据：Case、记录类型、Job、Plan、Facts、Result      (T, M)
+  model.py             纯数据：Case、Expect、Waiver、Checks、记录类型、Job、Plan、Facts、Result      (T, M)
   config/
     load.py            执行配置文件、合并默认值与本地覆盖、展开 ${VAR}       (C)
     schema.py          CFG 的键、类型、默认值；未知键给出最接近的建议        (C-04)
@@ -106,11 +106,13 @@ solouvm/
   backends/
     base.py            后端接口：编译/运行/种子/波形/覆盖率命令、错误模式    (S)
     vcs.py xrun.py questa.py iverilog.py verilator.py fake.py
+    fake_sim.sh        假仿真器的 bash 实现（S-06、D22），由 fake.py 渲染进生成物
   providers/
     base.py            Transport、Launcher、Sync 三个接口                    (H)
     transport_local.py transport_ssh.py
     launcher_make.py   launcher_lsf.py
     sync_none.py       sync_rsync.py  sync_git.py
+  pipeline.py          load → collect → plan → gen → push → build → run 的编排        (G, X)
   judge/
     facts.py           解析 job.facts                                        (X-04, Q1)
     scan.py            单遍日志扫描器                                        (J-12)
@@ -119,6 +121,7 @@ solouvm/
     prefilter.py       远端粗筛的关键词生成                                  (H-16)
     waivers.py         waiver 匹配与记录                                     (J-14)
     signature.py       错误签名归一化                                        (J-11)
+    __init__.py        判定编排：编译事实 + 每个 job 的 facts/日志 → Result 列表
   report/
     text.py json.py junit.py html.py                                         (K)
   records/
@@ -143,6 +146,7 @@ solouvm/
     regions.py         用户代码区的提取、合并、.orphan 输出                   (U-04, U-05)
     pkgfiles.py        维护各 package 的 <pkg>_files.svh                       (U-11)
     templates/         内置模板，按 style 版本组织                            (U-06)
+  init.py              起步项目生成（Z-01、U-03）
   hooks.py             A 端 hook 的加载与执行                                (W)
 ```
 
@@ -286,7 +290,7 @@ run_job.sh --kind build|job|check --dir DIR [--log NAME] [--run-id ID] [--job-id
 
 执行步骤：
 
-1. 由脚本自身的位置推出项目根的绝对路径，导出 `SOLOUVM_ROOT`；`kind=job` 时在命令末尾追加 `+SOLOUVM_ROOT=<路径>`（X-10）。
+1. 由脚本自身的位置推出项目根的绝对路径，导出 `SOLOUVM_ROOT`；`kind=job` 时在命令末尾追加 `+SOLOUVM_ROOT=<项目根绝对路径>` 与 `+SOLOUVM_OUTDIR=<DIR 绝对路径>`（X-10）。
 2. 创建 `DIR`。`--lock` 时获取 `DIR.lock`（D23）；拿到锁后如果 `.ok` 已经存在（另一轮刚编完同一个键），直接成功退出。
 3. 写入 `job.facts` 的开始段（`state=running`）。
 4. 进入 `DIR`，依次执行 provider 的 `setup`（H-12）与 `job.pre`（W-04）。
@@ -409,7 +413,7 @@ A 对本轮判定后状态在 `regress.retry_on` 中（默认只有 `error`，�
 - 记录写回只有一条路径：`records/write.py`（M-14）：
   1. 获取 A 上的记录锁 `.solouvm/locks/records.lock`（`mkdir` 锁），多个子 agent 可以并发调用；
   2. 读入目标文件并记下内容哈希；需要编号时在锁内分配；
-  3. 依据"`notes=[...]` 是 `Case(...)` 最后一个参数"的约定，用 `ast` 找到列表末尾，按原文件缩进插入新记录的源码文本；
+  3. 用 `ast` 定位目标 `Case(...)` 节点，按操作类型改写源码：追加记录时在 `notes=[...]` 末尾插入，`notes` 参数不存在时在参数表末尾补上 `notes=[...]`；更新记录（`bug update`、`todo done`、`triage write` 覆盖未审查结论、`triage review`）时按该记录节点的 `lineno`/`end_lineno`/`col_offset`/`end_col_offset` 整体替换；文件缺少 `from solouvm import ...` 中的目标名字时补齐导入；插入文本沿用该参数行首的缩进；
   4. 写回前确认文件内容没有在读与写之间被改动，否则放弃并报错；
   5. 重新加载整个 case 文件并校验，任何一步失败都恢复原文件。
 - `new test` 新增 case 走同一条路径：配置了 `case_dirs` 时新建 `cases/<name>.py`；否则在 `case.py` 的 `CASES` 列表末尾插入。

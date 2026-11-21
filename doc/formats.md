@@ -89,6 +89,7 @@ duration_s=398.214
 
 ```text
 job 依赖的编译键没有 .ok，且编译事实 rc != 0 → 编译失败（error）
+job 依赖的编译键没有 .ok，也没有编译事实 → 未编译（error）
 文件不存在                → 未运行
 无 state 或 state=running → 未完成（incomplete）；回归仍在进行时见 J-23
 run_id 与本轮不符           → 残留（error）

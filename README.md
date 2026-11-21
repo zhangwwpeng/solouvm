@@ -2,11 +2,22 @@
 
 SystemVerilog / UVM 仿真回归的 Python Runner。
 
-> **状态：设计阶段，尚无可用代码。** 本文描述的是目标形态，需求以 [doc/requirements.md](doc/requirements.md) 为准。
+> **状态：M1 ~ M4 核心与周边功能已实现。** 目前已通过内置 `fake` 仿真器端到端闭环及全套自动化测试；`requirements.md §25` 中的 `待定` 需求未实现，且 `requirements.md §26` 中的真实 EDA/集群工具细节尚待真实环境实测核验。需求见 [doc/requirements.md](doc/requirements.md)，使用手册见 [doc/guide/README.md](doc/guide/README.md)，进度见 [todo.md](todo.md)。
 
 你在控制机上用 Python 写三个文件：项目配置、编译文件清单、case 列表。solouvm 生成一套只依赖 `make` 和 `bash` 的编译与运行脚本，送到执行机上跑仿真，再把结果读回控制机判定、汇总，最后给出一份报告和一个确定的退出码。
 
 控制机和执行机可以是同一台，也可以是笔记本加远端服务器、集群提交节点加 LSF。
+
+## 安装与更新
+
+控制机只需 Python >= 3.10（零运行时第三方依赖）。分发时直接拷贝整个 `solouvm` 目录，用户的验证项目目录下无需存放或安装 `solouvm` 库，只调用 `solouvm` CLI：
+
+```bash
+./install.sh                  # 当前用户安装（~/.local/lib/solouvm 与 ~/.local/bin/solouvm，预编译 .pyc 并检查 .zshrc/.bashrc PATH）
+sudo ./install.sh --system    # 系统级安装（/usr/local/lib/solouvm 与 /usr/local/bin/solouvm，全用户可读可执行）
+```
+
+升级方式：离线直接用新版目录重新执行 `./install.sh`；联网可执行 `solouvm update`（默认拉取 `https://github.com/zhangwwpeng/solouvm`，支持 `--repo URL`、`--ref REF`、`--user`/`--system`/`--prefix`）。详见 [doc/guide/01-install.md](doc/guide/01-install.md)。
 
 ## 1. 核心思路
 
@@ -173,7 +184,7 @@ make build && make -j16 regress
 solouvm judge
 ```
 
-## 5. 计划中的命令
+## 5. 已实现命令
 
 | 命令 | 作用 |
 |------|------|
@@ -197,9 +208,11 @@ solouvm judge
 | `triage plan / packet / write / review / status` | 分诊：生成任务、取上下文包、写结论、审查、查看进度 |
 | `bug add / update`、`note add`、`todo add / done` | 经命令行写入 case 记录 |
 | `wave` | 以文本方式查询波形中的信号值 |
+| `cov merge / report` | 在执行机 B 合并并汇总覆盖率 |
 | `clean` | 清理生成物与运行目录 |
+| `update` | 联网从 Git 仓库拉取新版并执行安装更新 |
 
-以上是主要命令，完整列表、参数与里程碑见 [doc/cli.md](doc/cli.md)。
+以上是主要命令，完整 43 个子命令参数与使用方式见 [doc/guide/10-cli-reference.md](doc/guide/10-cli-reference.md) 与 [doc/cli.md](doc/cli.md)。
 
 退出码：0 全部通过；1 有测试失败；2 配置、环境或编译错误；130 被中断。
 
@@ -216,6 +229,8 @@ solouvm judge
 
 | 文档 | 内容 |
 |------|------|
+| [doc/guide/README.md](doc/guide/README.md) | 中文使用手册（安装、快速上手、配置、Case、分诊、UVM 脚手架、CLI、排错） |
+| [skills/solouvm/SKILL.md](skills/solouvm/SKILL.md) | 供 AI Agent 使用的 `solouvm` 工作流与角色权限技能说明 |
 | [doc/requirements.md](doc/requirements.md) | 全部功能需求、优先级、已决问题 |
 | [doc/architecture.md](doc/architecture.md) | 流水线、模块划分、目录布局、生成物、provider 接口 |
 | [doc/config.md](doc/config.md) | `solouvm.conf.py` / `solouvm.local.py` / `filelist.py` / `case.py` 完整参考 |
@@ -228,7 +243,7 @@ solouvm judge
 | [doc/decisions.md](doc/decisions.md) | 设计决策记录：理由、代价、备选 |
 | [todo.md](todo.md) | 实现进度 |
 
-所有文档目前均为设计稿，尚无代码。
+M1 ~ M4 代码、文档与自测已就绪，细节以 `doc/` 为准，待真实 EDA 环境验证项见 [doc/requirements.md §26](doc/requirements.md#26-不确定事项)。
 
 README 是总纲，只写结论与边界；细节以 `doc/` 为准，二者冲突时修正其一，不留两套说法。
 

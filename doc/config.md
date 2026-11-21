@@ -452,7 +452,7 @@ CI 或夜间回归只想跑已就绪的 case 时，用 `regress --stage ready,si
 | `Todo` | `title`、`owner`、`due`、`done`（默认 `False`）、`id`（可选） | |
 | `Log` | `date`、`text` | 调试记录 |
 | `Note` | `text`、`date`（可选） | 一般备注 |
-| `Triage` | `task`、`verdict`、`confidence`、`summary`、`evidence`、`doc`、`bugs`、`judged_status`、`review` | 只由 `solouvm triage write` / `triage review` 写入（M-24）；`judged_status` 是分诊时的机械判定结果，之后结果变化时该记录视为过期（AI-20） |
+| `Triage` | `task`、`verdict`、`confidence`、`summary`、`evidence`、`doc`、`bugs`、`judged_status`、`review` | 只由 `solouvm triage write` / `triage review` 写入（M-24）；`judged_status` 是分诊时的机械判定结果（`{job_id: status}` 映射），之后结果变化时该记录视为过期（AI-20） |
 
 所有记录都有可选字段 `author` 与 `at`（写入时间）；经命令行写入时自动填写（M-25）。`Bug.reporter` 是发现问题的人，`author` 是写下这条记录的人或 agent，两者可以不同。
 

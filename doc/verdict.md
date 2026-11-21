@@ -33,7 +33,7 @@
 
 | # | 条件 | 结果 | 原因文本示例 |
 |---|------|------|--------------|
-| 0a | 本 job 依赖的编译失败 | `error` | `build failed: default/3c9e1f2a, see build.log line 120` |
+| 0a | 本 job 依赖的编译失败或未编译 | `error` | `build failed: default/3c9e1f2a, see build.log line 120`；无 `.ok` 且无编译事实时为 `build not run: default/3c9e1f2a` |
 | 0b | 没有 `job.facts` | `error`（`--allow-missing` 时 `skip`） | `not run: job.facts missing` |
 | 0c | `run_id` 与本轮不符 | `error` | `stale facts from run 20261102-…` |
 | 0d | `schema` 或 `generator` 不兼容 | `error` | `facts schema 2 not supported; regenerate` |
@@ -63,6 +63,7 @@
 - **为什么环境失败排在退出码之前**：license 失败时仿真器一般也返回非 0，如果先看退出码，会被误判为设计失败。环境失败的匹配在 A 上用 Python 正则进行（X-16），改了模式重新 `judge` 即可生效。
 - **为什么 FATAL 排在 ERROR 之前**：两者都是 fail，但原因文本只写第一条命中的，FATAL 信息量更大。
 - **UVM 与非 UVM 的区分**：日志中出现过任一 `UVM_INFO` / `UVM_WARNING` / `UVM_ERROR` / `UVM_FATAL` 即视为 UVM 日志。
+- **0a 的判定依据**：由 `plan.json` 的 `jobs[].build` 查 `builds[<mode>]` 得到编译键，检查 `.solouvm/build/<mode>/<key>/.ok`；不存在时读同目录 `job.facts`：有结束段且 `rc != 0` 判编译失败，没有结束段或文件缺失判"未编译"。整条命令存在编译失败时退出码为 2（`BUILD_FAILED`），其余"不算通过"的结果退出码为 1（`TESTS_FAILED`）。
 
 ## 4. 日志扫描
 
