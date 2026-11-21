@@ -1,6 +1,6 @@
 # 10 命令行参考
 
-完整设计契约参见 [doc/cli.md](../cli.md)。以下所有子命令共 43 个，已全部接入 `solouvm.cli`。
+完整设计契约参见 [doc/cli.md](../cli.md)。以下所有子命令共 47 个，已全部接入 `solouvm.cli`。
 
 ## 1. 退出码约定
 
@@ -25,7 +25,7 @@
 | `--no-hooks` | 跳过 A 侧钩子（预留参数） |
 | `--version` | 打印 `solouvm 0.1.0` 并退出 |
 
-## 3. 全量命令清单（43 个）
+## 3. 全量命令清单（47 个）
 
 | 分类 | 命令 | 主要用途 |
 |------|------|----------|
@@ -48,6 +48,8 @@
 | | `triage plan\|packet\|write\|review\|status` | 分诊规划、7 节上下文包、写结论、主代理审查与状态 |
 | | `doc` / `progress` | 导出 Markdown 用例手册 / 输出全局进度与矛盾提示 |
 | **覆盖率与维护** | `cov merge` / `cov report` / `clean` / `help [TOPIC]` | 合库、覆盖率报告、清理 `.solouvm` 产物、离线读设计文档 |
+| | `pkg list\|sync\|update` | 查看、拉取或更新 `CFG["packages"]` 外部包 |
 | | `update [--repo URL] [--ref REF] [--user\|--system]` | 联网从 Git 仓库更新 CLI 安装 |
+| | `completion <bash\|zsh>` | 生成 Bash/Zsh 命令行补全脚本 |
 
 > 注：`--resume`、`watch` 命令当前属 [requirements.md §25](../requirements.md#25-里程碑归属) 中的 **待定** 需求。

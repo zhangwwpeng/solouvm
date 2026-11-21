@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 from solouvm import __version__, output, ui
 from solouvm.backends import fake_sim_source, get_backend
 from solouvm.buildkey import compute_build_keys
-from solouvm.collect import collect_cases, collect_files, load_filelist
+from solouvm.collect import collect_cases
 from solouvm.errors import BuildError, ConfigError, InfraError
 from solouvm.gen import (
     render_launch,
@@ -39,6 +39,7 @@ from solouvm.history import (
 from solouvm.judge import judge_completed_attempt, judge_exit_code, judge_run, write_results
 from solouvm.judge.facts import FactsError, parse_facts
 from solouvm.model import Bug, Case, Facts, Job, Plan, Result
+from solouvm.packages import collect_project_files, package_sync_files
 from solouvm.plan import read_plan, write_plan
 from solouvm.providers import get_provider
 from solouvm.providers.transport_local import LocalTransport
@@ -328,7 +329,9 @@ def _push_generated(config: Config, provider: Provider, manifest: Sequence[str])
     # is covered by rsync/git transports; no extra copy needed for local/none.
 
 
-def _gen_manifest(root: Path, run_id: str, builds: dict[str, str]) -> list[str]:
+def _gen_manifest(
+    root: Path, run_id: str, builds: dict[str, str], config: Config | None = None
+) -> list[str]:
     manifest = [
         ".solouvm/Makefile",
         ".solouvm/gen/bin/fake_sim.sh",
@@ -345,6 +348,8 @@ def _gen_manifest(root: Path, run_id: str, builds: dict[str, str]) -> list[str]:
             rel = f".solouvm/build/{mode}/{key}/{group_file}"
             if (root / rel).is_file():
                 manifest.append(rel)
+    if config is not None:
+        manifest.extend(package_sync_files(root, config))
     return sorted(set(manifest))
 
 
@@ -368,7 +373,7 @@ def build(
         _skip_gen = False
 
     if not _skip_gen:
-        eff_files = files if files is not None else collect_files(root, load_filelist(root))
+        eff_files = files if files is not None else collect_project_files(config)
         gen_res = gen(
             config=config,
             plan=plan,
@@ -378,7 +383,7 @@ def build(
         )
         manifest = list(gen_res["manifest"])  # type: ignore[arg-type]
     else:
-        manifest = _gen_manifest(root, plan.run_id, plan.builds)
+        manifest = _gen_manifest(root, plan.run_id, plan.builds, config=config)
 
     for m in selected_modes:
         if m not in plan.builds:
@@ -1114,9 +1119,7 @@ def run(
     verbose: int = 0,
 ) -> int:
     """Execute ``solouvm run`` and return its exit code (0/1/2/130)."""
-    eff_files = (
-        files if files is not None else collect_files(config.root, load_filelist(config.root))
-    )
+    eff_files = files if files is not None else collect_project_files(config)
     _, _, exit_code = run_regression(
         config=config,
         plan=plan,
@@ -1344,7 +1347,7 @@ def rerun(
                 failed=failed,
                 statuses=statuses,
             )
-        files = collect_files(root, load_filelist(root))
+        files = collect_project_files(config)
         results, payload, code = run_regression(
             config=config,
             plan=new_plan,

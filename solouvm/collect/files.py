@@ -10,6 +10,7 @@ import runpy
 import shlex
 import sys
 import traceback
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -17,6 +18,8 @@ from solouvm.collect.dotf import join_base, walk_dotf
 from solouvm.errors import ConfigError
 
 GROUPS = ("rtl", "tb", "top")  # 合并清单按此顺序拼接（F-04）
+PACKAGE_GROUPS = ("rtl", "tb")
+DEFAULT_FILELIST_PRIORITY = 100
 FILELIST_NAME = "filelist.py"
 
 _MAGIC_RE = re.compile(r"[*?[]")
@@ -28,6 +31,14 @@ class FileEntry:
     group: str
     source: str  # 来自哪个条目或哪个 .f，供 solouvm files 显示（F-10）
     outside_root: bool = False  # 根外绝对路径：B 上必须存在相同路径（F-07）
+
+
+@dataclass(frozen=True)
+class LoadedFilelist:
+    spec: dict | list
+    priority: int
+    depends: tuple[str, ...]
+    path: Path
 
 
 @dataclass
@@ -49,8 +60,49 @@ class FileList:
         return [entry for entry in self.entries if entry.outside_root]
 
 
-def load_filelist(root: Path) -> dict | list:
-    """Execute ``<root>/filelist.py`` and return ``files()`` or ``FILES``."""
+def _parse_priority(raw: object, path: Path) -> int:
+    if raw is None:
+        return DEFAULT_FILELIST_PRIORITY
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ConfigError(
+            f"{FILELIST_NAME}: PRIORITY must be an int, got {raw!r}",
+            code="CFG_INVALID",
+            file=path,
+        )
+    return raw
+
+
+def _parse_depends(raw: object, path: Path) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence):
+        raise ConfigError(
+            f"{FILELIST_NAME}: DEPENDS must be a sequence of package names, got {raw!r}",
+            code="CFG_INVALID",
+            file=path,
+        )
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            raise ConfigError(
+                f"{FILELIST_NAME}: DEPENDS entries must be non-empty strings, got {item!r}",
+                code="CFG_INVALID",
+                file=path,
+            )
+        name = item.strip()
+        if "\n" in name or "\r" in name:
+            raise ConfigError(
+                f"{FILELIST_NAME}: DEPENDS entry {item!r} cannot contain newlines",
+                code="CFG_INVALID",
+                file=path,
+            )
+        if name not in out:
+            out.append(name)
+    return tuple(out)
+
+
+def load_filelist_meta(root: Path) -> LoadedFilelist:
+    """Execute ``<root>/filelist.py`` and return spec together with PRIORITY and DEPENDS."""
     path = Path(root) / FILELIST_NAME
     if not path.is_file():
         raise ConfigError(f"{FILELIST_NAME} not found in {root}", code="FILES_MISSING")
@@ -58,8 +110,7 @@ def load_filelist(root: Path) -> dict | list:
     try:
         namespace = runpy.run_path(str(path), run_name="__solouvm_filelist__")
         func = namespace.get("files")
-        if callable(func):
-            return func()
+        spec = func() if callable(func) else None
     except BaseException as exc:
         if isinstance(exc, KeyboardInterrupt):
             raise
@@ -70,16 +121,29 @@ def load_filelist(root: Path) -> dict | list:
     finally:
         with contextlib.suppress(ValueError):
             sys.path.remove(str(path.parent))
-    if "FILES" not in namespace:
-        raise ConfigError(
-            f"{FILELIST_NAME} must define FILES or files()", code="CFG_LOAD_FAILED", file=path
-        )
-    return namespace["FILES"]
+
+    if spec is None:
+        if "FILES" not in namespace:
+            raise ConfigError(
+                f"{FILELIST_NAME} must define FILES or files()", code="CFG_LOAD_FAILED", file=path
+            )
+        spec = namespace["FILES"]
+
+    priority = _parse_priority(namespace.get("PRIORITY"), path)
+    depends = _parse_depends(namespace.get("DEPENDS"), path)
+    return LoadedFilelist(spec=spec, priority=priority, depends=depends, path=path)
+
+
+def load_filelist(root: Path) -> dict | list:
+    """Execute ``<root>/filelist.py`` and return ``files()`` or ``FILES``."""
+    return load_filelist_meta(root).spec
 
 
 def collect_files(root: Path, spec: dict | list) -> FileList:
     """Expand ``spec`` (``FILES``) into a :class:`FileList`; paths are relative to ``root``."""
-    return _Collector(Path(root)).run(spec)
+    collector = _Collector(Path(root))
+    collector.add_spec(spec, base_dir=collector.root)
+    return collector.finalize()
 
 
 class _Collector:
@@ -95,10 +159,29 @@ class _Collector:
         self.seen: set[str] = set()
         self.missing: list[str] = []
 
-    def run(self, spec: dict | list) -> FileList:
+    def add_spec(
+        self,
+        spec: dict | list,
+        *,
+        base_dir: Path,
+        source_prefix: str = "",
+        allowed_groups: tuple[str, ...] = GROUPS,
+        use_base_for_dash_f: bool = False,
+    ) -> None:
+        resolved_base = Path(os.path.normpath(base_dir.absolute()))
         for group, entries in _groups(spec).items():
+            if group not in allowed_groups:
+                continue
             for entry in entries:
-                self._entry(group, entry)
+                self._entry(
+                    group,
+                    entry,
+                    base_dir=resolved_base,
+                    source_prefix=source_prefix,
+                    use_base_for_dash_f=use_base_for_dash_f,
+                )
+
+    def finalize(self) -> FileList:
         if self.missing:
             raise ConfigError(
                 "file list entries matched nothing:\n" + "\n".join(self.missing),
@@ -108,7 +191,15 @@ class _Collector:
 
     # ------------------------------------------------------------ filelist.py 里的一个条目
 
-    def _entry(self, group: str, entry: object) -> None:
+    def _entry(
+        self,
+        group: str,
+        entry: object,
+        *,
+        base_dir: Path,
+        source_prefix: str,
+        use_base_for_dash_f: bool,
+    ) -> None:
         if not isinstance(entry, str) or not entry.strip():
             raise ConfigError(
                 f"FILES[{group!r}]: entries must be non-empty strings, got {entry!r}",
@@ -126,33 +217,62 @@ class _Collector:
                     raise ConfigError(
                         f"FILES[{group!r}]: option {token} in {entry!r} needs an argument"
                     )
-                arg = join_base(self.root, tokens[i + 1])
+                arg = join_base(base_dir, tokens[i + 1])
                 i += 2
                 if token in ("-v", "-y"):
                     self._lib(group, f"{token} {self._norm(arg)[0]}")
                 else:
-                    self._dotf(group, entry, Path(arg), relative_to_dotf=token == "-F")
+                    self._dotf(
+                        group,
+                        entry,
+                        Path(arg),
+                        relative_to_dotf=token == "-F",
+                        base_dir=base_dir,
+                        source_prefix=source_prefix,
+                        use_base_for_dash_f=use_base_for_dash_f,
+                    )
                 continue
             i += 1
             if token.startswith(("+incdir+", "+define+", "+libext+")):
-                self._plus(group, token, self.root)
+                self._plus(group, token, base_dir)
             elif token.startswith(("-", "+")):
                 raise ConfigError(f"FILES[{group!r}]: unsupported option {token!r} in {entry!r}")
             else:
-                self._path(group, token, source=entry, label=f"{group}: {entry}", base=self.root)
+                src = f"{source_prefix}{entry}"
+                self._path(
+                    group,
+                    token,
+                    source=src,
+                    label=f"{group}: {src}",
+                    base=base_dir,
+                )
 
-    def _dotf(self, group: str, entry: str, path: Path, *, relative_to_dotf: bool) -> None:
+    def _dotf(
+        self,
+        group: str,
+        entry: str,
+        path: Path,
+        *,
+        relative_to_dotf: bool,
+        base_dir: Path,
+        source_prefix: str,
+        use_base_for_dash_f: bool,
+    ) -> None:
         try:
-            items = walk_dotf(path, relative_to_dotf=relative_to_dotf)
+            items = walk_dotf(
+                path,
+                relative_to_dotf=relative_to_dotf,
+                base_dir=base_dir if use_base_for_dash_f else None,
+            )
         except ConfigError as exc:
             if exc.code != "FILES_MISSING":
                 raise
-            self.missing.append(f"{group}: {entry} ({exc.message})")
+            self.missing.append(f"{group}: {source_prefix}{entry} ({exc.message})")
             return
         i = 0
         while i < len(items):
             token, dotf, joined = items[i]
-            source = self._norm(str(dotf))[0]
+            source = f"{source_prefix}{self._norm(str(dotf))[0]}"
             if token in ("-v", "-y"):
                 self._lib(group, f"{token} {self._norm(items[i + 1][0])[0]}")
                 i += 2

@@ -83,7 +83,7 @@ solouvm [全局参数] <命令> [命令参数]
 
 | 类别 | 命令 |
 |------|------|
-| 只读 | `uvm diff`、`lint-style`、`list`、`files`、`config`、`validate`、`status`、`log`、`explain`、`wave`、`notes`、`history`、`progress`、`schema`、`help`、`triage packet`、`triage status` |
+| 只读 | `uvm diff`、`lint-style`、`list`、`files`、`config`、`validate`、`status`、`log`、`explain`、`wave`、`notes`、`history`、`progress`、`schema`、`help`、`completion`、`pkg list`、`triage packet`、`triage status` |
 | 记录写入 | `bug add`、`bug update`（只能改自己登记且尚未审查的 bug）、`note add`、`todo add`、`triage write` |
 
 其余命令（`gen`、`build`、`regress`、`rerun`、`stop`、`clean`、`triage plan`、`triage review`、`todo done` 等）一律拒绝，错误码 `ROLE_DENIED`，退出码 2。
@@ -560,6 +560,28 @@ EOF
 | `--prefix DIR` | 安装或更新到自定义前缀目录 |
 | `--python PATH` | 指定目标 Python >= 3.10 解释器路径 |
 | `--dry-run` | 只打印计划执行的 git 与安装命令，不实际下载或修改安装 |
+
+### `solouvm completion SHELL`
+
+输出静态命令行补全脚本（支持 `bash` 或 `zsh`），从 CLI 解析器定义直接生成、零外部运行时依赖。只读命令，允许在 `--role triage` 下执行。
+
+- 执行 `./install.sh`（以及 `solouvm update`）时，会自动生成并安装到 `<prefix>/share/zsh/site-functions/_solouvm` 与 `<prefix>/share/bash-completion/completions/solouvm`（`--uninstall` 时同步清理）。
+- 也可在当前会话中手动临时启用：
+
+```bash
+source <(solouvm completion zsh)        # zsh
+eval "$(solouvm completion bash)"       # bash
+```
+
+### `solouvm pkg list | sync | update`
+
+管理 `CFG["packages"]` 中声明的 Git/本地包：
+
+| 子命令 | 说明 | `--role triage` |
+|--------|------|------------------|
+| `solouvm pkg list` | 只读检查各包状态、优先级、依赖、`filelist.py` 与本地 commit（不触发 clone） | 允许 |
+| `solouvm pkg sync [NAME...]` | 克隆缺失的 git 包（已有目录直接跳过），并校验 `PRIORITY` 与 `DEPENDS` 顺序 | 禁止 |
+| `solouvm pkg update [NAME...]` | 重新克隆并原子替换指定或全部 git 包（跳过本地 `path` 包） | 禁止 |
 
 ## 8. 手动模式
 

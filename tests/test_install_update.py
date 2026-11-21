@@ -77,11 +77,22 @@ def test_install_sh_user_precompiles_pyc_and_prints_path_guidance(tmp_path: Path
     assert "NOT in your current PATH" in proc.stdout
     assert 'export PATH="$HOME/.local/bin:$PATH"' in proc.stdout
     assert "~/.zshrc" in proc.stdout and "~/.bashrc" in proc.stdout
+    assert "Shell completion:" in proc.stdout
+    assert ".local/share/zsh/site-functions" in proc.stdout
+    assert ".local/share/bash-completion/completions/solouvm" in proc.stdout
 
     bin_path = fake_home / ".local" / "bin" / "solouvm"
     lib_dir = fake_home / ".local" / "lib" / "solouvm"
+    zsh_comp = fake_home / ".local" / "share" / "zsh" / "site-functions" / "_solouvm"
+    bash_comp = fake_home / ".local" / "share" / "bash-completion" / "completions" / "solouvm"
     assert bin_path.is_file()
     assert stat.S_IMODE(bin_path.stat().st_mode) == 0o755
+    assert zsh_comp.is_file()
+    assert bash_comp.is_file()
+    assert stat.S_IMODE(zsh_comp.stat().st_mode) == 0o644
+    assert stat.S_IMODE(bash_comp.stat().st_mode) == 0o644
+    assert zsh_comp.read_text(encoding="utf-8").splitlines()[0] == "#compdef solouvm"
+    assert "complete -F _solouvm_complete solouvm" in bash_comp.read_text(encoding="utf-8")
     assert (lib_dir / "doc" / "verdict.md").is_file()
 
     meta = read_install_meta(lib_dir)
@@ -89,6 +100,8 @@ def test_install_sh_user_precompiles_pyc_and_prints_path_guidance(tmp_path: Path
     assert meta["mode"] == "user"
     assert meta["version"] == "0.1.0"
     assert meta["prefix"] == str(fake_home / ".local")
+    assert meta["zsh_completion"] == str(zsh_comp)
+    assert meta["bash_completion"] == str(bash_comp)
 
     # Precompiled bytecode exists
     pyc_files = list((lib_dir / "solouvm" / "__pycache__").glob("cli.*.pyc"))
@@ -158,13 +171,21 @@ def test_install_sh_prefix_permissions_atomic_upgrade_uninstall_and_errors(tmp_p
 
     bin_path = prefix / "bin" / "solouvm"
     lib_dir = prefix / "lib" / "solouvm"
+    zsh_comp = prefix / "share" / "zsh" / "site-functions" / "_solouvm"
+    bash_comp = prefix / "share" / "bash-completion" / "completions" / "solouvm"
     assert stat.S_IMODE(bin_path.stat().st_mode) == 0o755
     cli_mode = stat.S_IMODE((lib_dir / "solouvm" / "cli.py").stat().st_mode)
     assert cli_mode & stat.S_IROTH
+    assert zsh_comp.is_file() and (stat.S_IMODE(zsh_comp.stat().st_mode) & stat.S_IROTH)
+    assert bash_comp.is_file() and (stat.S_IMODE(bash_comp.stat().st_mode) & stat.S_IROTH)
+    assert f'fpath=("{zsh_comp.parent}" $fpath)' in res1.stdout
+    assert f'source "{bash_comp}"' in res1.stdout
 
-    # Plant stale file to verify upgrade swaps atomically without leftovers
+    # Plant stale file & stale completion content to verify upgrade refreshes atomically
     stale = lib_dir / "solouvm" / "stale_removed.py"
     stale.write_text("# stale\n", encoding="utf-8")
+    zsh_comp.write_text("# stale zsh comp\n", encoding="utf-8")
+    bash_comp.write_text("# stale bash comp\n", encoding="utf-8")
 
     res2 = subprocess.run(
         ["bash", str(INSTALL_SH), "--prefix", str(prefix), "--python", sys.executable],
@@ -177,8 +198,10 @@ def test_install_sh_prefix_permissions_atomic_upgrade_uninstall_and_errors(tmp_p
     assert res2.returncode == 0, res2.stdout + res2.stderr
     assert "Upgrading solouvm 0.1.0 -> 0.1.0" in res2.stdout
     assert not stale.exists()
+    assert zsh_comp.read_text(encoding="utf-8").splitlines()[0] == "#compdef solouvm"
+    assert "complete -F _solouvm_complete solouvm" in bash_comp.read_text(encoding="utf-8")
 
-    # Uninstall cleans lib and bin completely
+    # Uninstall cleans lib, bin, and completions completely
     res_un = subprocess.run(
         ["bash", str(INSTALL_SH), "--uninstall", "--prefix", str(prefix)],
         cwd=REPO_ROOT,
@@ -189,6 +212,8 @@ def test_install_sh_prefix_permissions_atomic_upgrade_uninstall_and_errors(tmp_p
     assert res_un.returncode == 0, res_un.stdout + res_un.stderr
     assert not lib_dir.exists()
     assert not bin_path.exists()
+    assert not zsh_comp.exists()
+    assert not bash_comp.exists()
 
     # Invalid flag combinations and unwritable prefix fail cleanly with exit 2
     bad_combo = subprocess.run(
@@ -300,6 +325,12 @@ def test_solouvm_update_end_to_end_from_local_git_repo_and_meta_reuse(tmp_path: 
     sha_030 = _git(upstream, "rev-parse", "HEAD").strip()
 
     bin_path = prefix / "bin" / "solouvm"
+    zsh_comp = prefix / "share" / "zsh" / "site-functions" / "_solouvm"
+    bash_comp = prefix / "share" / "bash-completion" / "completions" / "solouvm"
+    assert zsh_comp.is_file()
+    assert bash_comp.is_file()
+    zsh_comp.write_text("# stale before update\n", encoding="utf-8")
+    bash_comp.write_text("# stale before update\n", encoding="utf-8")
 
     # Update to v0.2.0 via tag WITHOUT repeating --prefix/--python (reuses .install-meta)
     upd1 = subprocess.run(
@@ -316,6 +347,8 @@ def test_solouvm_update_end_to_end_from_local_git_repo_and_meta_reuse(tmp_path: 
     assert d1["version"] == "0.2.0"
     assert d1["mode"] == "prefix"
     assert d1["prefix"] == str(prefix)
+    assert zsh_comp.read_text(encoding="utf-8").splitlines()[0] == "#compdef solouvm"
+    assert "complete -F _solouvm_complete solouvm" in bash_comp.read_text(encoding="utf-8")
 
     v2 = subprocess.run([str(bin_path), "--version"], capture_output=True, text=True, check=True)
     assert v2.stdout.strip() == "solouvm 0.2.0"
@@ -333,6 +366,8 @@ def test_solouvm_update_end_to_end_from_local_git_repo_and_meta_reuse(tmp_path: 
     d2 = json.loads(upd2.stdout)["data"]
     assert d2["previous_version"] == "0.2.0"
     assert d2["version"] == "0.3.0"
+    assert zsh_comp.is_file()
+    assert bash_comp.is_file()
 
     v3 = subprocess.run([str(bin_path), "--version"], capture_output=True, text=True, check=True)
     assert v3.stdout.strip() == "solouvm 0.3.0"

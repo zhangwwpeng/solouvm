@@ -17,7 +17,7 @@ SystemVerilog / UVM 仿真回归的 Python Runner。
 sudo ./install.sh --system    # 系统级安装（/usr/local/lib/solouvm 与 /usr/local/bin/solouvm，全用户可读可执行）
 ```
 
-升级方式：离线直接用新版目录重新执行 `./install.sh`；联网可执行 `solouvm update`（默认拉取 `https://github.com/zhangwwpeng/solouvm`，支持 `--repo URL`、`--ref REF`、`--user`/`--system`/`--prefix`）。详见 [doc/guide/01-install.md](doc/guide/01-install.md)。
+升级方式：离线直接用新版目录重新执行 `./install.sh`；联网可执行 `solouvm update`（默认拉取 `https://github.com/zhangwwpeng/solouvm`，支持 `--repo URL`、`--ref REF`、`--user`/`--system`/`--prefix`）。安装与更新均会自动安装 Bash/Zsh 命令行补全脚本（亦可通过 `solouvm completion bash|zsh` 输出）。详见 [doc/guide/01-install.md](doc/guide/01-install.md)。
 
 ## 1. 核心思路
 
@@ -211,8 +211,10 @@ solouvm judge
 | `cov merge / report` | 在执行机 B 合并并汇总覆盖率 |
 | `clean` | 清理生成物与运行目录 |
 | `update` | 联网从 Git 仓库拉取新版并执行安装更新 |
+| `pkg list / sync / update` | 查看、拉取或更新 `CFG["packages"]` 外部库 |
+| `completion <bash\|zsh>` | 输出 Bash/Zsh 命令行补全脚本（随 `install.sh` 自动安装） |
 
-以上是主要命令，完整 43 个子命令参数与使用方式见 [doc/guide/10-cli-reference.md](doc/guide/10-cli-reference.md) 与 [doc/cli.md](doc/cli.md)。
+以上是主要命令，完整 47 个子命令参数与使用方式见 [doc/guide/10-cli-reference.md](doc/guide/10-cli-reference.md) 与 [doc/cli.md](doc/cli.md)。
 
 退出码：0 全部通过；1 有测试失败；2 配置、环境或编译错误；130 被中断。
 
@@ -222,7 +224,7 @@ solouvm judge
 - 不在执行机上做判定。
 - 不把波形、覆盖率库回传到控制机。
 - 不管交互式调试：Verdi 等 GUI 在执行机上自行使用；只提供只读的文本化波形查询。
-- 不做 IP 依赖管理：交给 FuseSoC / Bender，再导入它们输出的 `.f`。
+- 不做递归 SAT/传递依赖求解：支持通过 `CFG["packages"]` 单次拉取 Git/本地包并按其 `filelist.py` 中的 `PRIORITY`/`DEPENDS` 校验加载顺序；复杂 RTL IP 依赖仍可交给 FuseSoC / Bender 输出 `.f` 后导入。
 - 不做 RTL lint、formal、综合流程（`lint-style` 只检查 UVM 环境是否符合风格规范）。
 
 ## 7. 文档

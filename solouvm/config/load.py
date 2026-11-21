@@ -29,6 +29,7 @@ from solouvm.config.schema import (
     JobHooks,
     LauncherConfig,
     LimitsConfig,
+    PackageConfig,
     ProviderConfig,
     RegressConfig,
     RunConfig,
@@ -37,7 +38,10 @@ from solouvm.config.schema import (
     TriageConfig,
     UvmConfig,
     invalid,
+    v_any_int,
     v_choice,
+    v_nonempty_str,
+    v_optional,
     v_str_list,
 )
 from solouvm.errors import ConfigError
@@ -192,6 +196,56 @@ def _validate_provider_section(
     return out
 
 
+def _validate_packages_layer(data: object) -> dict[str, dict[str, object]]:
+    if not isinstance(data, dict):
+        raise invalid("packages", "dict", data)
+    opt_str = v_optional(v_nonempty_str, "non-empty str")
+    opt_int = v_optional(v_any_int, "int")
+    pkg_spec: dict[str, object] = {
+        "git": opt_str,
+        "ref": opt_str,
+        "path": opt_str,
+        "subdir": opt_str,
+        "priority": opt_int,
+    }
+    out: dict[str, dict[str, object]] = {}
+    for pname, pval in data.items():
+        path = f"packages.{pname}"
+        if not isinstance(pname, str):
+            raise invalid(path, "str key", pname)
+        if pname in (".", "..") or not _NAME_RE.match(pname):
+            raise invalid(path, "a package name of letters, digits, '_', '.', '-'", pname)
+        if isinstance(pval, str):
+            git_val = v_nonempty_str(path, pval)
+            out[pname] = {"git": git_val}
+            continue
+        if not isinstance(pval, dict):
+            raise invalid(path, "str or dict", pval)
+        entry = _validate(pval, pkg_spec, f"{path}.")
+        if entry.get("git") is not None and entry.get("path") is not None:
+            raise ConfigError(
+                f"{path}: cannot specify both 'git' and 'path'",
+                code="CFG_INVALID",
+            )
+        out[pname] = entry
+    return out
+
+
+def _prepare_packages_merge(merged_pkgs: dict, layer_pkgs: dict) -> None:
+    """Clear mutually exclusive source keys when an override switches git <-> path."""
+    for pname, lval in layer_pkgs.items():
+        base_entry = merged_pkgs.get(pname)
+        if not isinstance(base_entry, dict) or not isinstance(lval, dict):
+            continue
+        has_path = lval.get("path") is not None
+        has_git = lval.get("git") is not None
+        if has_path and not has_git:
+            base_entry.pop("git", None)
+            base_entry.pop("ref", None)
+        elif has_git and not has_path:
+            base_entry.pop("path", None)
+
+
 def _validate_providers_layer(
     data: object,
     registry: ProviderRegistry,
@@ -267,6 +321,8 @@ def load_config(path: Path, *, cli: dict[str, object] | None = None) -> Config:
             registry=registry,
             effective_kinds=effective_kinds,
         )
+        if isinstance(checked.get("packages"), dict) and isinstance(merged.get("packages"), dict):
+            _prepare_packages_merge(merged["packages"], checked["packages"])
         merged = deep_merge(merged, checked)
         sources.update(dict.fromkeys(_leaves(checked), label))
 
@@ -349,6 +405,9 @@ def _validate(
             raise invalid(path, "str key", key)
         if key == "providers" and prefix == "" and registry is not None:
             out[key] = _validate_providers_layer(value, registry, effective_kinds or {})
+            continue
+        if key == "packages" and prefix == "":
+            out[key] = _validate_packages_layer(value)
             continue
         if key in spec:
             sub = spec[key]
@@ -460,9 +519,81 @@ def _build(root: Path, merged: dict, sources: dict[str, str]) -> Config:
         history=HistoryConfig(**merged["history"]),
         limits=LimitsConfig(**merged["limits"]),
         plugins=merged["plugins"],
+        packages=_build_packages(merged["packages"]),
         uvm=UvmConfig(**merged["uvm"]),
         sources=sources,
     )
+
+
+def _clean_pkg_str(path: str, raw: object) -> str | None:
+    if raw is None:
+        return None
+    text = _expand(path, str(raw)).strip()
+    if "\n" in text or "\r" in text:
+        raise ConfigError(f"{path}: newlines are not allowed", code="CFG_INVALID")
+    if not text:
+        raise ConfigError(f"{path}: expected non-empty str", code="CFG_INVALID")
+    return text
+
+
+def _build_packages(raw_packages: dict) -> dict[str, PackageConfig]:
+    out: dict[str, PackageConfig] = {}
+    for pname, raw in raw_packages.items():
+        prefix = f"packages.{pname}"
+        git_url = _clean_pkg_str(f"{prefix}.git", raw.get("git"))
+        ref = _clean_pkg_str(f"{prefix}.ref", raw.get("ref"))
+        local_path = _clean_pkg_str(f"{prefix}.path", raw.get("path"))
+        subdir = _clean_pkg_str(f"{prefix}.subdir", raw.get("subdir"))
+        priority = raw.get("priority")
+
+        if git_url is not None and git_url.startswith("-"):
+            raise ConfigError(
+                f"{prefix}.git: repository URL cannot start with '-'",
+                code="CFG_INVALID",
+            )
+        if ref is not None and ref.startswith("-"):
+            raise ConfigError(
+                f"{prefix}.ref: git ref cannot start with '-'",
+                code="CFG_INVALID",
+            )
+        if git_url is not None and local_path is not None:
+            raise ConfigError(
+                f"{prefix}: cannot specify both 'git' and 'path'",
+                code="CFG_INVALID",
+            )
+        if git_url is None and local_path is None:
+            raise ConfigError(
+                f"{prefix}: must specify either 'git' or 'path'",
+                code="CFG_INVALID",
+            )
+        if local_path is not None and ref is not None:
+            raise ConfigError(
+                f"{prefix}: 'ref' is only supported with 'git' packages",
+                code="CFG_INVALID",
+            )
+        if subdir is not None:
+            norm_sub = subdir.replace("\\", "/")
+            if (
+                os.path.isabs(subdir)
+                or norm_sub.startswith("/")
+                or ".." in Path(norm_sub).parts
+                or (len(norm_sub) >= 2 and norm_sub[1] == ":")
+            ):
+                raise ConfigError(
+                    f"{prefix}.subdir: must be a relative path inside the package ({subdir!r})",
+                    code="CFG_INVALID",
+                )
+            subdir = norm_sub.rstrip("/") or None
+
+        out[pname] = PackageConfig(
+            name=pname,
+            git=git_url,
+            ref=ref,
+            path=local_path,
+            subdir=subdir,
+            priority=priority,
+        )
+    return out
 
 
 def _expand(path: str, value: str) -> str:

@@ -16,6 +16,7 @@ from solouvm.gen.makefile import (
 )
 from solouvm.gen.scripts import LAUNCH_SH, RUN_JOB_SH, render_launch, render_run_job
 from solouvm.gen.shell import make_escape, relpath, sh_quote
+from solouvm.packages import package_sync_files
 
 if TYPE_CHECKING:
     from solouvm.backends.base import Backend
@@ -93,5 +94,6 @@ def write_generated_project_files(
     )
     _write_text(root / run_mk_rel, run_mk_text)
     manifest.append(run_mk_rel)
+    manifest.extend(package_sync_files(root, config))
 
-    return sorted(manifest)
+    return sorted(set(manifest))

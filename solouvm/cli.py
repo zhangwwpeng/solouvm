@@ -16,6 +16,7 @@ from solouvm.backends.base import Backend
 from solouvm.check import format_check_result, run_check
 from solouvm.cli_parser import Handler, build_parser
 from solouvm.collect import collect_cases, collect_files, load_filelist
+from solouvm.completion import generate_completion
 from solouvm.config import Config, find_config, load_config
 from solouvm.cov import cov_merge, cov_report
 from solouvm.errors import ConfigError, SolouvmError
@@ -44,6 +45,12 @@ from solouvm.ops import (
     show_config,
     show_help,
     validate_project,
+)
+from solouvm.packages import (
+    collect_project_files,
+    list_packages,
+    sync_packages,
+    update_packages,
 )
 from solouvm.plan import Plan, build_plan, read_plan
 from solouvm.providers import Provider, get_provider
@@ -187,7 +194,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
 
 def _cmd_files(args: argparse.Namespace) -> int:
     config, _ = _load_ctx(args)
-    flist = collect_files(config.root, load_filelist(config.root))
+    flist = collect_project_files(config)
     rows = [
         [e.group, e.path + (" [OUTSIDE ROOT]" if e.outside_root else ""), e.source]
         for e in flist.entries
@@ -414,7 +421,7 @@ def _plan_for_exec(config: Config, provider: Provider, args: argparse.Namespace)
 def _cmd_gen(args: argparse.Namespace) -> int:
     config, provider = _load_ctx(args)
     plan = _plan_for_exec(config, provider, args)
-    flist = collect_files(config.root, load_filelist(config.root))
+    flist = collect_project_files(config)
     res = pipeline.gen(config=config, plan=plan, files=flist, provider=provider)
     if ui.is_json_mode():
         output.emit_json("gen", res, next_=["solouvm build", "solouvm regress"])
@@ -427,7 +434,7 @@ def _cmd_gen(args: argparse.Namespace) -> int:
 def _cmd_build(args: argparse.Namespace) -> int:
     config, provider = _load_ctx(args)
     plan = _plan_for_exec(config, provider, args)
-    flist = collect_files(config.root, load_filelist(config.root))
+    flist = collect_project_files(config)
     res = pipeline.build(
         config=config,
         plan=plan,
@@ -459,7 +466,7 @@ def _run_or_regress(args: argparse.Namespace, *, require_selector: bool) -> int:
     budget_s = _parse_budget_arg(getattr(args, "budget", None))
     max_fail = _validate_max_fail(getattr(args, "max_fail", None))
     plan = _plan_for_exec(config, provider, args)
-    flist = collect_files(config.root, load_filelist(config.root))
+    flist = collect_project_files(config)
     _results, payload, code = pipeline.run_regression(
         config=config,
         plan=plan,
@@ -529,7 +536,7 @@ def _cmd_rerun(args: argparse.Namespace) -> int:
 
 def _cmd_check(args: argparse.Namespace) -> int:
     config, provider = _load_ctx(args)
-    flist = collect_files(config.root, load_filelist(config.root))
+    flist = collect_project_files(config)
     res, code = run_check(
         config=config,
         files=flist,
@@ -1183,6 +1190,75 @@ def _cmd_update(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_completion(args: argparse.Namespace) -> int:
+    script = generate_completion(args.shell)
+    if ui.is_json_mode():
+        output.emit_json("completion", {"shell": args.shell, "script": script})
+        return 0
+    if not script.endswith("\n"):
+        script += "\n"
+    sys.stdout.write(script)
+    return 0
+
+
+def _cmd_pkg_list(args: argparse.Namespace) -> int:
+    config, _ = _load_ctx(args)
+    items = list_packages(config)
+    shown, trunc = output.truncate_items(items, _limit(args), more="solouvm pkg list --limit 0")
+    if ui.is_json_mode():
+        output.emit_json(
+            "pkg list",
+            {"packages": shown, "total": len(items)},
+            truncated=trunc,
+        )
+        return 0
+    if not items:
+        ui.summary("no packages configured")
+        return 0
+    rows = [
+        [
+            str(item["name"]),
+            str(item["source_kind"]),
+            (
+                "ready"
+                if (item["exists"] and item["filelist_ok"])
+                else str(item["error"] or "missing")
+            ),
+            str(item["priority"]),
+            str(item["commit"] or item["ref"] or "-"),
+            ",".join(item["depends"]) or "-",
+        ]
+        for item in shown
+    ]
+    ui.table(["NAME", "KIND", "STATUS", "PRIORITY", "REF/COMMIT", "DEPENDS"], rows, limit=0)
+    if trunc:
+        ui.info(f"... omitted {trunc['omitted']}; use {trunc['more']}")
+    ui.summary(f"{len(items)} package(s)")
+    return 0
+
+
+def _run_pkg_action(args: argparse.Namespace, *, command: str, fn) -> int:
+    config, _ = _load_ctx(args)
+    names = list(getattr(args, "names", None) or []) or None
+    data = fn(config, names=names)
+    if ui.is_json_mode():
+        output.emit_json(command, data)
+        return 0
+    pkgs = data.get("packages") or []
+    assert isinstance(pkgs, list)
+    for item in pkgs:
+        status = item.get("status", "")
+        commit = item.get("commit")
+        suffix = f" ({commit})" if commit else ""
+        ui.info(f"  {item['name']}: {status}{suffix}")
+    order = data.get("resolved_order") or []
+    ui.summary(
+        f"{command}: {len(pkgs)} package(s)"
+        + (f"; load order: {', '.join(str(x) for x in order)}" if order else "")
+    )
+    return 0
+
+
 def _handlers() -> dict[str, Handler]:
     return {
         "init": _cmd_init,
@@ -1228,6 +1304,10 @@ def _handlers() -> dict[str, Handler]:
         "clean": _cmd_clean,
         "help": _cmd_help,
         "update": _cmd_update,
+        "completion": _cmd_completion,
+        "pkg list": _cmd_pkg_list,
+        "pkg sync": lambda a: _run_pkg_action(a, command="pkg sync", fn=sync_packages),
+        "pkg update": lambda a: _run_pkg_action(a, command="pkg update", fn=update_packages),
     }
 
 

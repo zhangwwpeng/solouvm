@@ -38,6 +38,36 @@ sudo ./install.sh --system --python /usr/bin/python3
 ./install.sh --uninstall --user        # 或 sudo ./install.sh --uninstall --system
 ```
 
+### 命令行补全（随 `install.sh` 自动安装）
+
+执行 `./install.sh` 或 `solouvm update` 时，会自动预生成并安装 Bash 与 Zsh 静态补全脚本，并在 `--uninstall` 时一并清理：
+
+| 安装模式 | Zsh 补全路径 | Bash 补全路径 |
+|----------|--------------|---------------|
+| `--user`（默认） | `$HOME/.local/share/zsh/site-functions/_solouvm` | `$HOME/.local/share/bash-completion/completions/solouvm` |
+| `--system` | `/usr/local/share/zsh/site-functions/_solouvm` | `/usr/local/share/bash-completion/completions/solouvm` |
+| `--prefix DIR` | `DIR/share/zsh/site-functions/_solouvm` | `DIR/share/bash-completion/completions/solouvm` |
+
+- **`--user` 模式启用**：安装结束会检查 `~/.zshrc` 与 `~/.bashrc`，若未配置可按需添加：
+
+```zsh
+# ~/.zshrc
+fpath=("$HOME/.local/share/zsh/site-functions" $fpath)
+autoload -Uz compinit && compinit
+```
+
+```bash
+# ~/.bashrc（若系统未通过 bash-completion >= 2 自动加载）
+[ -f "$HOME/.local/share/bash-completion/completions/solouvm" ] && source "$HOME/.local/share/bash-completion/completions/solouvm"
+```
+
+- **临时手动启用**：
+
+```bash
+source <(solouvm completion zsh)        # zsh
+eval "$(solouvm completion bash)"       # bash
+```
+
 ### 更新方式
 
 - **离线环境**：获取新版发布目录后，直接再执行一次 `./install.sh --user`（或 `sudo ./install.sh --system`），脚本会执行原子升级。

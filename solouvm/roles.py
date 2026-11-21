@@ -26,6 +26,8 @@ TRIAGE_READONLY_COMMANDS: frozenset[str] = frozenset(
         "triage packet",
         "triage status",
         "version",
+        "completion",
+        "pkg list",
     }
 )
 
@@ -63,6 +65,8 @@ MAIN_ONLY_COMMANDS: frozenset[str] = frozenset(
         "bisect",
         "clean",
         "update",
+        "pkg sync",
+        "pkg update",
     }
 )
 

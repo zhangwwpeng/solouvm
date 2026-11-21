@@ -36,6 +36,7 @@ def walk_dotf(
     path: Path,
     *,
     relative_to_dotf: bool,
+    base_dir: Path | None = None,
     _depth: int = 1,
     _stack: tuple[Path, ...] = (),
 ) -> list[tuple[str, Path, bool]]:
@@ -52,7 +53,7 @@ def walk_dotf(
         raise ConfigError(f"cyclic .f include: {chain}", code="CFG_INVALID")
     stack = (*_stack, key)
 
-    base = path.parent if relative_to_dotf else Path.cwd()
+    base = path.parent if relative_to_dotf else (base_dir if base_dir is not None else Path.cwd())
     out: list[tuple[str, Path, bool]] = []
     tokens = _tokens(path)
     i = 0
@@ -69,6 +70,7 @@ def walk_dotf(
             out += walk_dotf(
                 Path(arg),
                 relative_to_dotf=token == "-F",
+                base_dir=base_dir,
                 _depth=_depth + 1,
                 _stack=stack,
             )

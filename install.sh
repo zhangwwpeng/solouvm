@@ -132,6 +132,10 @@ LIB_PARENT="$prefix/lib"
 INSTALL_LIB="$LIB_PARENT/solouvm"
 INSTALL_BIN="$prefix/bin"
 BIN_PATH="$INSTALL_BIN/solouvm"
+ZSH_COMP_DIR="$prefix/share/zsh/site-functions"
+ZSH_COMP_PATH="$ZSH_COMP_DIR/_solouvm"
+BASH_COMP_DIR="$prefix/share/bash-completion/completions"
+BASH_COMP_PATH="$BASH_COMP_DIR/solouvm"
 
 nearest_existing_dir() {
     local p="$1"
@@ -160,11 +164,17 @@ check_dir_writable() {
 }
 
 if [ "$uninstall" -eq 1 ]; then
-    if [ -e "$INSTALL_LIB" ]; then
+    if [ -e "$INSTALL_LIB" ] || [ -L "$INSTALL_LIB" ]; then
         check_dir_writable "$LIB_PARENT" "library directory"
     fi
-    if [ -e "$BIN_PATH" ]; then
+    if [ -e "$BIN_PATH" ] || [ -L "$BIN_PATH" ]; then
         check_dir_writable "$INSTALL_BIN" "binary directory"
+    fi
+    if [ -e "$ZSH_COMP_PATH" ] || [ -L "$ZSH_COMP_PATH" ]; then
+        check_dir_writable "$ZSH_COMP_DIR" "zsh completion directory"
+    fi
+    if [ -e "$BASH_COMP_PATH" ] || [ -L "$BASH_COMP_PATH" ]; then
+        check_dir_writable "$BASH_COMP_DIR" "bash completion directory"
     fi
     removed=0
     if [ -e "$INSTALL_LIB" ] || [ -L "$INSTALL_LIB" ]; then
@@ -175,6 +185,16 @@ if [ "$uninstall" -eq 1 ]; then
     if [ -e "$BIN_PATH" ] || [ -L "$BIN_PATH" ]; then
         rm -f "$BIN_PATH"
         echo "Removed $BIN_PATH"
+        removed=1
+    fi
+    if [ -e "$ZSH_COMP_PATH" ] || [ -L "$ZSH_COMP_PATH" ]; then
+        rm -f "$ZSH_COMP_PATH"
+        echo "Removed $ZSH_COMP_PATH"
+        removed=1
+    fi
+    if [ -e "$BASH_COMP_PATH" ] || [ -L "$BASH_COMP_PATH" ]; then
+        rm -f "$BASH_COMP_PATH"
+        echo "Removed $BASH_COMP_PATH"
         removed=1
     fi
     if [ "$removed" -eq 0 ]; then
@@ -305,6 +325,8 @@ resolve_python() {
 
 check_dir_writable "$INSTALL_LIB" "library directory"
 check_dir_writable "$INSTALL_BIN" "binary directory"
+check_dir_writable "$ZSH_COMP_DIR" "zsh completion directory"
+check_dir_writable "$BASH_COMP_DIR" "bash completion directory"
 if [ -e "$INSTALL_LIB" ] && [ ! -w "$LIB_PARENT" ]; then
     if [ "$mode" = "system" ]; then
         die "no write permission on $LIB_PARENT to upgrade existing install. Run 'sudo ./install.sh --system'."
@@ -342,12 +364,20 @@ fi
 STAGE_DIR=""
 BACKUP_DIR=""
 BIN_TMP=""
+ZSH_COMP_TMP=""
+BASH_COMP_TMP=""
 cleanup_stage() {
     if [ -n "$STAGE_DIR" ] && [ -d "$STAGE_DIR" ]; then
         rm -rf "$STAGE_DIR" 2>/dev/null || true
     fi
     if [ -n "$BIN_TMP" ] && [ -e "$BIN_TMP" ]; then
         rm -f "$BIN_TMP" 2>/dev/null || true
+    fi
+    if [ -n "$ZSH_COMP_TMP" ] && [ -e "$ZSH_COMP_TMP" ]; then
+        rm -f "$ZSH_COMP_TMP" 2>/dev/null || true
+    fi
+    if [ -n "$BASH_COMP_TMP" ] && [ -e "$BASH_COMP_TMP" ]; then
+        rm -f "$BASH_COMP_TMP" 2>/dev/null || true
     fi
 }
 trap cleanup_stage EXIT INT TERM
@@ -385,6 +415,8 @@ mode=$mode
 prefix=$prefix
 lib_dir=$INSTALL_LIB
 bin_path=$BIN_PATH
+zsh_completion=$ZSH_COMP_PATH
+bash_completion=$BASH_COMP_PATH
 python=$PYTHON_BIN
 installed_at=$INSTALLED_AT
 EOF
@@ -395,6 +427,13 @@ if [ -f "$STAGE_DIR/solouvm/backends/fake_sim.sh" ]; then
 fi
 
 "$PYTHON_BIN" -c 'import sys; lib = sys.argv.pop(1); sys.argv[0] = "solouvm"; sys.path.insert(0, lib); from solouvm.cli import main; raise SystemExit(main(["--version"]))' "$STAGE_DIR" >/dev/null
+
+mkdir -p "$ZSH_COMP_DIR" "$BASH_COMP_DIR"
+ZSH_COMP_TMP="$ZSH_COMP_DIR/.solouvm.tmp.$$"
+BASH_COMP_TMP="$BASH_COMP_DIR/.solouvm.tmp.$$"
+"$PYTHON_BIN" -c 'import sys; lib = sys.argv.pop(1); shell = sys.argv.pop(1); sys.argv[0] = "solouvm"; sys.path.insert(0, lib); from solouvm.cli import main; raise SystemExit(main(["completion", shell]))' "$STAGE_DIR" zsh >"$ZSH_COMP_TMP"
+"$PYTHON_BIN" -c 'import sys; lib = sys.argv.pop(1); shell = sys.argv.pop(1); sys.argv[0] = "solouvm"; sys.path.insert(0, lib); from solouvm.cli import main; raise SystemExit(main(["completion", shell]))' "$STAGE_DIR" bash >"$BASH_COMP_TMP"
+chmod 644 "$ZSH_COMP_TMP" "$BASH_COMP_TMP"
 
 if [ -e "$INSTALL_LIB" ] || [ -L "$INSTALL_LIB" ]; then
     BACKUP_DIR="$LIB_PARENT/.solouvm.bak.$$"
@@ -423,8 +462,13 @@ chmod 755 "$BIN_TMP"
 mv "$BIN_TMP" "$BIN_PATH"
 BIN_TMP=""
 
+mv "$ZSH_COMP_TMP" "$ZSH_COMP_PATH"
+ZSH_COMP_TMP=""
+mv "$BASH_COMP_TMP" "$BASH_COMP_PATH"
+BASH_COMP_TMP=""
+
 if [ "$mode" = "system" ]; then
-    chmod a+rX "$LIB_PARENT" "$INSTALL_BIN" 2>/dev/null || true
+    chmod a+rX "$LIB_PARENT" "$INSTALL_BIN" "$prefix/share" "$prefix/share/zsh" "$ZSH_COMP_DIR" "$prefix/share/bash-completion" "$BASH_COMP_DIR" 2>/dev/null || true
 fi
 
 echo ""
@@ -433,6 +477,8 @@ echo "  Mode:        $mode"
 echo "  Executable:  $BIN_PATH"
 echo "  Library:     $INSTALL_LIB (with precompiled .pyc)"
 echo "  Python:      $PYTHON_BIN"
+echo "  Zsh comp:    $ZSH_COMP_PATH"
+echo "  Bash comp:   $BASH_COMP_PATH"
 echo ""
 
 path_has_dir=0
@@ -469,6 +515,35 @@ if [ "$mode" = "user" ]; then
         echo "Then reload your shell:"
         echo "  source ~/.zshrc   # or: source ~/.bashrc"
     fi
+
+    echo ""
+    echo "Shell completion:"
+    if [ -f "$HOME/.zshrc" ] && (grep -F '.local/share/zsh/site-functions' "$HOME/.zshrc" >/dev/null 2>&1 || grep -F 'solouvm completion zsh' "$HOME/.zshrc" >/dev/null 2>&1); then
+        echo "  - ~/.zshrc: zsh completion looks configured"
+    else
+        echo "  - ~/.zshrc: add to enable zsh completion:"
+        echo "      fpath=(\"\$HOME/.local/share/zsh/site-functions\" \$fpath)"
+        echo "      autoload -Uz compinit && compinit"
+    fi
+    if [ -f "$HOME/.bashrc" ] && (grep -F '.local/share/bash-completion/completions/solouvm' "$HOME/.bashrc" >/dev/null 2>&1 || grep -F 'solouvm completion bash' "$HOME/.bashrc" >/dev/null 2>&1); then
+        echo "  - ~/.bashrc: bash completion looks configured"
+    else
+        echo "  - ~/.bashrc: auto-loaded if bash-completion >= 2 is installed; otherwise add:"
+        echo "      [ -f \"\$HOME/.local/share/bash-completion/completions/solouvm\" ] && source \"\$HOME/.local/share/bash-completion/completions/solouvm\""
+    fi
+elif [ "$mode" = "system" ]; then
+    if [ "$path_has_dir" -eq 1 ]; then
+        echo "PATH check: OK ($INSTALL_BIN is in your current PATH)."
+    else
+        echo "PATH check: $INSTALL_BIN is NOT in your current PATH."
+        echo "Ensure '$INSTALL_BIN' is added to PATH (e.g. in /etc/profile or ~/.zshrc / ~/.bashrc):"
+        echo "  export PATH=\"$INSTALL_BIN:\$PATH\""
+    fi
+    echo ""
+    echo "Shell completion:"
+    echo "  Installed to standard system directories ($ZSH_COMP_PATH and $BASH_COMP_PATH)."
+    echo "  New shells with compinit / bash-completion enabled will pick them up automatically."
+    echo "  Manual fallback: source <(solouvm completion zsh)   # or: eval \"\$(solouvm completion bash)\""
 else
     if [ "$path_has_dir" -eq 1 ]; then
         echo "PATH check: OK ($INSTALL_BIN is in your current PATH)."
@@ -477,6 +552,13 @@ else
         echo "Ensure '$INSTALL_BIN' is added to PATH (e.g. in /etc/profile or ~/.zshrc / ~/.bashrc):"
         echo "  export PATH=\"$INSTALL_BIN:\$PATH\""
     fi
+    echo ""
+    echo "Shell completion:"
+    echo "  Zsh (~/.zshrc):"
+    echo "    fpath=(\"$ZSH_COMP_DIR\" \$fpath)"
+    echo "    autoload -Uz compinit && compinit"
+    echo "  Bash (~/.bashrc):"
+    echo "    source \"$BASH_COMP_PATH\""
 fi
 
 resolved_cmd="$(command -v solouvm 2>/dev/null || true)"

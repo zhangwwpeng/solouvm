@@ -394,4 +394,33 @@ def build_parser(handlers: dict[str, Handler]) -> argparse.ArgumentParser:
     p.add_argument("--python", dest="python_bin", default=None, help="Python >= 3.10 binary path")
     p.add_argument("--dry-run", action="store_true", help="Print planned git and install actions")
 
+    p = _add_sub(
+        sub, "completion", "completion", handlers, common, "Generate shell completion script"
+    )
+    p.add_argument("shell", choices=("bash", "zsh"), help="Target shell (bash or zsh)")
+
+    pkg_grp = sub.add_parser("pkg", parents=[common], help="Manage external git/local packages")
+    pkg_sub = pkg_grp.add_subparsers(dest="pkg_command", required=True)
+    _add_sub(
+        pkg_sub, "list", "pkg list", handlers, common, "List configured packages and local status"
+    )
+    p = _add_sub(
+        pkg_sub,
+        "sync",
+        "pkg sync",
+        handlers,
+        common,
+        "Clone missing git packages (skip existing)",
+    )
+    p.add_argument("names", nargs="*", help="Optional package names to sync")
+    p = _add_sub(
+        pkg_sub,
+        "update",
+        "pkg update",
+        handlers,
+        common,
+        "Re-fetch git packages from upstream",
+    )
+    p.add_argument("names", nargs="*", help="Optional package names to update")
+
     return parser

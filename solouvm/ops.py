@@ -21,11 +21,18 @@ from solouvm.collect.cases import (
     _case_files,
     _load_file,
 )
-from solouvm.collect.files import GROUPS, FileList, collect_files, load_filelist
+from solouvm.collect.files import (
+    GROUPS,
+    PACKAGE_GROUPS,
+    FileList,
+    _Collector,
+    load_filelist_meta,
+)
 from solouvm.config.load import expand_env, load_config
 from solouvm.errors import ERROR_CODES, ConfigError, SolouvmError
 from solouvm.gen.shell import sh_quote
 from solouvm.model import validate_records
+from solouvm.packages import ResolvedPackage, check_host_depends, resolve_packages
 from solouvm.uvmgen.pkgfiles import find_svh_inconsistencies
 
 if TYPE_CHECKING:
@@ -134,13 +141,20 @@ def _check_dotf_defaults(
     root: Path,
     raw_spec: dict | list,
     issues: list[ValidationIssue],
+    *,
+    base_dir: Path | None = None,
+    file_label: str = "filelist.py",
+    allowed_groups: tuple[str, ...] = GROUPS,
 ) -> None:
     """Warn/error on ``${VAR:-default}`` inside filelist entries or imported ``.f`` files."""
+    eff_base = Path(base_dir) if base_dir is not None else root
     if isinstance(raw_spec, (list, tuple)):
-        groups = {"rtl": list(raw_spec)}
+        groups = {"rtl": list(raw_spec)} if "rtl" in allowed_groups else {}
     elif isinstance(raw_spec, dict):
         groups = {
-            g: list(raw_spec.get(g, [])) for g in GROUPS if isinstance(raw_spec.get(g), Sequence)
+            g: list(raw_spec.get(g, []))
+            for g in allowed_groups
+            if isinstance(raw_spec.get(g), Sequence)
         }
     else:
         return
@@ -180,7 +194,7 @@ def _check_dotf_defaults(
                 tok = tokens[idx]
                 if tok in ("-f", "-F") and idx + 1 < len(tokens):
                     nxt = tokens[idx + 1]
-                    base = dotf_path.parent if tok == "-F" else root
+                    base = dotf_path.parent if tok == "-F" else eff_base
                     candidate = Path(nxt) if Path(nxt).is_absolute() else base / nxt
                     scan_dotf(candidate)
                     idx += 2
@@ -194,7 +208,7 @@ def _check_dotf_defaults(
             if _BASH_DEFAULT_ENV_RE.search(entry):
                 issues.append(
                     ValidationIssue(
-                        file="filelist.py",
+                        file=file_label,
                         line=None,
                         severity="error",
                         message=(
@@ -210,7 +224,7 @@ def _check_dotf_defaults(
                 if norm_entry in seen_entries:
                     issues.append(
                         ValidationIssue(
-                            file="filelist.py",
+                            file=file_label,
                             line=None,
                             severity="warning",
                             message=f"duplicate filelist entry {entry!r} (F-08)",
@@ -227,7 +241,7 @@ def _check_dotf_defaults(
                 if tokens[idx] in ("-f", "-F") and idx + 1 < len(tokens):
                     sub = Path(tokens[idx + 1])
                     if not sub.is_absolute():
-                        sub = root / sub
+                        sub = eff_base / sub
                     scan_dotf(sub)
                     idx += 2
                 else:
@@ -370,8 +384,26 @@ def validate_project(
         return ValidationReport(issues=issues)
 
     root = Path(config.root)
+    pkgs: list[ResolvedPackage] = []
+    pkg_error = False
+    if config.packages:
+        try:
+            pkgs = resolve_packages(config, auto_fetch=True)
+        except SolouvmError as exc:
+            pkg_error = True
+            issues.append(
+                ValidationIssue(
+                    file=_rel_display(root, exc.file),
+                    line=exc.line,
+                    severity="error",
+                    message=exc.message,
+                    code=exc.code,
+                    hint=exc.hint,
+                )
+            )
+
     try:
-        raw_spec = load_filelist(root)
+        host_fl = load_filelist_meta(root)
     except SolouvmError as exc:
         issues.append(
             ValidationIssue(
@@ -384,22 +416,62 @@ def validate_project(
             )
         )
     else:
-        _check_dotf_defaults(root, raw_spec, issues)
-        try:
-            file_list = collect_files(root, raw_spec)
-        except SolouvmError as exc:
-            issues.append(
-                ValidationIssue(
-                    file=_rel_display(root, exc.file) or "filelist.py",
-                    line=exc.line,
-                    severity="error",
-                    message=exc.message,
-                    code=exc.code,
-                    hint=exc.hint,
+        if not pkg_error:
+            try:
+                check_host_depends(host_fl, {pkg.name for pkg in pkgs})
+            except SolouvmError as exc:
+                issues.append(
+                    ValidationIssue(
+                        file=_rel_display(root, exc.file) or "filelist.py",
+                        line=exc.line,
+                        severity="error",
+                        message=exc.message,
+                        code=exc.code,
+                        hint=exc.hint,
+                    )
                 )
+        for pkg in pkgs:
+            _check_dotf_defaults(
+                root,
+                pkg.filelist.spec,
+                issues,
+                base_dir=pkg.root_dir,
+                file_label=_rel_display(root, pkg.filelist.path) or str(pkg.filelist.path),
+                allowed_groups=PACKAGE_GROUPS,
             )
-        else:
-            _check_duplicate_sv_modules(root, file_list, issues)
+        _check_dotf_defaults(root, host_fl.spec, issues)
+        if not pkg_error:
+            try:
+                collector = _Collector(root)
+                for pkg in pkgs:
+                    collector.add_spec(
+                        pkg.filelist.spec,
+                        base_dir=pkg.root_dir,
+                        source_prefix=f"pkg:{pkg.name}:",
+                        allowed_groups=PACKAGE_GROUPS,
+                        use_base_for_dash_f=True,
+                    )
+                collector.add_spec(
+                    host_fl.spec,
+                    base_dir=collector.root,
+                    source_prefix="",
+                    allowed_groups=GROUPS,
+                    use_base_for_dash_f=False,
+                )
+                file_list = collector.finalize()
+            except SolouvmError as exc:
+                issues.append(
+                    ValidationIssue(
+                        file=_rel_display(root, exc.file) or "filelist.py",
+                        line=exc.line,
+                        severity="error",
+                        message=exc.message,
+                        code=exc.code,
+                        hint=exc.hint,
+                    )
+                )
+            else:
+                _check_duplicate_sv_modules(root, file_list, issues)
 
     for cs in _collect_cases_resilient(config, issues):
         rel = _rel_display(root, cs.file)
@@ -632,6 +704,7 @@ SCHEMAS: dict[str, dict[str, object]] = {
             "history": {"type": "object"},
             "limits": {"type": "object"},
             "plugins": {"type": "array", "items": {"type": "string"}},
+            "packages": {"type": "object"},
             "uvm": {"type": "object"},
         },
     },

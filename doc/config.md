@@ -274,6 +274,32 @@ push 按显式清单进行（H-08、H-09）：
 | `debug_dir` | `"docs/debug"` | 调试文档的存放目录（入库），文档路径为 `<debug_dir>/<run_id>/<序号>.md` |
 | `weak_signals` | `True` | 是否把 J-19 的虚假 pass 弱信号纳入分诊 |
 
+### 2.12 `packages`
+
+声明外部 Git 或本地路径包（如 VIP / UVM Agent 仓库）：
+
+```python
+CFG = {
+    "simulator": "vcs",
+    "top": "tb_top",
+    "packages": {
+        "base_uvc": "https://github.com/org/base_uvc.git",  # 简写，默认当作 git URL
+        "apb_agent": {
+            "git": "https://github.com/org/apb_agent.git",
+            "ref": "v1.2.0",       # 可选：branch / tag / commit
+            # "subdir": "vip/apb", # 可选：仓库内相对子目录
+            # "priority": 50,      # 可选：覆盖包内 filelist.py 的 PRIORITY
+        },
+    },
+}
+```
+
+- 每个包必须包含 `git`（远端仓库）或 `path`（本地目录，常用在 `solouvm.local.py` 中联调），不可同时填写；`solouvm.local.py` 切换 `path` 时会自动清掉继承的 `git`/`ref`（反之亦然）。
+- Git 包拉取到项目内的 `.solouvm/packages/<name>/`：**运行命令时仅检查目录是否存在，存在即直接复用，不存在才执行单次 `git clone`**；不会自动递归拉取子依赖。需主动拉取最新代码时使用 `solouvm pkg update`。
+- **要求每个包目录内必须存在 `filelist.py`**，否则报 `FILES_MISSING`。被宿主作为 package 引入时，仅收集其中的 `rtl` 与 `tb` 组，忽略包自身的 `top` 组（避免与宿主 `tb_top` 冲突）；该仓库独立运行自测时不受影响。
+- 包内 `filelist.py` 可选声明 `PRIORITY = 100`（整数，**数字越小优先级越高、越先编译**；数字越大越靠后）与 `DEPENDS = ["base_uvc"]`：按 `(effective_priority, CFG['packages'] 声明顺序)` 排序后依次校验，若 `DEPENDS` 中的包未在宿主 `CFG['packages']` 中配置或尚未加载（优先级倒挂/成环），立即报错 `CFG_INVALID`。
+- 推送到执行机 B 时，已克隆到 `.solouvm/packages/` 下的包文件（不含 `.git/`）会自动纳入同步清单。
+
 ### 2.11 环境变量展开
 
 字符串中可以写 `${VAR}`。按值在哪里使用，分两类处理（C-03）：
@@ -371,6 +397,22 @@ FILES = {
 ### 4.3 函数形式
 
 需要动态计算时，定义 `files()` 返回同样结构的值。
+
+### 4.4 包优先级与依赖声明（`PRIORITY` / `DEPENDS`）
+
+任意 `filelist.py`（尤其是通过 `CFG["packages"]` 引入的库）均可在模块顶层可选声明：
+
+```python
+PRIORITY = 50                 # 整数，默认 100；数字越小优先级越高（越先编译），数字越大越晚编译
+DEPENDS = ["base_uvc"]        # 在本 filelist 之前必须已经加载完成的 package 名字列表
+
+FILES = {
+    "tb": ["+incdir+src", "src/apb_if.sv", "src/apb_pkg.sv"],
+}
+```
+
+- 宿主 `filelist.py` 也可以写 `DEPENDS = ["apb_agent"]`，在所有 package 加载完成后校验其依赖是否已配齐。
+- 被作为 package 收集时，`FILES` 中的相对路径、`glob`、`+incdir+`、`-f`/`-F`、`-v`/`-y` 均以该 package 根目录为基准展开，仅并入 `rtl` 与 `tb` 组（跳过 `top`）。
 
 ## 5. `case.py`
 

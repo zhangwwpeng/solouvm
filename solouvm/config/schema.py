@@ -68,6 +68,7 @@ DEFAULTS: dict[str, object] = {
     "history": {"keep": 50},
     "limits": {"max_jobs": 2000},
     "plugins": [],
+    "packages": {},
     "uvm": {"templates": None},
 }
 
@@ -139,6 +140,12 @@ def v_int(minimum: int) -> Validator:
         return value
 
     return check
+
+
+def v_any_int(path: str, value: object) -> object:
+    if not _is_int(value):
+        raise invalid(path, "int", value)
+    return value
 
 
 def v_optional(inner: Validator, expected: str) -> Validator:
@@ -319,6 +326,7 @@ SPEC: dict[str, object] = {
     "history": {"keep": v_int(1)},
     "limits": {"max_jobs": v_int(1)},
     "plugins": v_str_list,
+    "packages": v_any,
     "uvm": {"templates": v_optional(v_nonempty_str, "non-empty str")},
 }
 
@@ -439,6 +447,16 @@ class UvmConfig:
 
 
 @dataclass
+class PackageConfig:
+    name: str
+    git: str | None = None
+    ref: str | None = None
+    path: str | None = None
+    subdir: str | None = None
+    priority: int | None = None
+
+
+@dataclass
 class Config:
     root: Path
     project: str
@@ -464,4 +482,5 @@ class Config:
     limits: LimitsConfig
     plugins: list[str]
     uvm: UvmConfig
+    packages: dict[str, PackageConfig] = field(default_factory=dict)
     sources: dict[str, str] = field(default_factory=dict)  # 键路径 -> default|conf|local|cli
