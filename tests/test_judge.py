@@ -266,8 +266,8 @@ def test_judge_run_active_partial_and_allow_missing(tmp_path: Path) -> None:
     strict_res = judge_run(
         config=cfg, plan=plan, provider=prov, partial=True, allow_missing=False, today=TODAY
     )
-    assert strict_res[1].status == "error"
-    assert strict_res[1].reason == "not run: job.facts missing"
+    assert strict_res[1].status == "incomplete"
+    assert strict_res[1].reason == "not run yet: job.facts missing"
 
 
 def test_judge_build_failure_and_corrupted_facts_isolation(tmp_path: Path) -> None:

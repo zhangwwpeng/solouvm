@@ -22,7 +22,7 @@
 | `--limit N` | 截断行/条目数（默认 `50`；`0` 表示不截断） |
 | `--role main\|triage` | 执行角色权限控制（`triage` 仅允许只读与安全写记录命令） |
 | `--provider NAME` | 临时覆盖配置中的 `provider` |
-| `--no-hooks` | 跳过 A 侧钩子（预留参数） |
+| `--no-hooks` | 跳过 A 侧钩子 |
 | `--version` | 打印 `solouvm 0.1.0` 并退出 |
 
 ## 3. 全量命令清单（47 个）
@@ -33,7 +33,7 @@
 | | `config [KEY]` | 打印合并后的最终配置及值来源文件 |
 | | `files` | 按组打印收集后的文件清单（标出 `[OUTSIDE ROOT]`） |
 | | `validate` | 仅校验配置、文件清单、case 与记录语法 |
-| | `schema [NAME]` | 输出 `job.facts`/`plan`/`results`/`tasks`/`json_envelope` JSON Schema |
+| | `schema [NAME]` | 输出 `facts`、`output`、`packet`、`plan` 或 `results` 的 JSON Schema |
 | | `list` | 预览选中扩展后的 job 计划表（不生成文件） |
 | | `doctor` | 检查 A 与 B 环境连通性及可执行工具 |
 | **UVM 脚手架** | `new agent\|env\|test\|seq\|vseq NAME` | 生成 Style 1 UVM 组件骨架 |

@@ -655,7 +655,11 @@ def _build_transport_cfg(name: str, raw: dict) -> TransportConfig:
     if transport.workdir is not None:
         transport.workdir = _expand(f"{prefix}.workdir", transport.workdir)
     if isinstance(transport.ssh_opts, str):
-        transport.ssh_opts = shlex.split(_expand(f"{prefix}.ssh_opts", transport.ssh_opts))
+        expanded = _expand(f"{prefix}.ssh_opts", transport.ssh_opts)
+        try:
+            transport.ssh_opts = shlex.split(expanded)
+        except ValueError as exc:
+            raise ConfigError(f"{prefix}.ssh_opts: {exc}", code="CFG_INVALID") from None
     else:
         transport.ssh_opts = [_expand(f"{prefix}.ssh_opts", v) for v in transport.ssh_opts]
     return transport

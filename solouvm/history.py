@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import os
 import platform
@@ -13,11 +14,13 @@ import socket
 import statistics
 import subprocess
 from collections import OrderedDict
+from collections.abc import Callable
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from solouvm.errors import ConfigError, InfraError
+from solouvm.errors import ConfigError, InfraError, RunActiveError
 from solouvm.plan import read_plan
 from solouvm.units import parse_sim_time_ns
 
@@ -376,7 +379,7 @@ def detect_sim_version(backend: Backend, provider: Provider, root: Path) -> str 
     cmd_str = raw_cmd.replace("{root}", ".").strip()
     setup = provider.setup.strip() if provider.setup else ""
     if setup:
-        argv = ["bash", "-c", f"{setup} && {cmd_str}"]
+        argv = ["bash", "-c", f"{{\n{setup}\n}} >/dev/null 2>&1 && {cmd_str}"]
     elif _SHELL_META_RE.search(cmd_str):
         argv = ["bash", "-c", cmd_str]
     else:
@@ -400,11 +403,7 @@ def detect_sim_version(backend: Backend, provider: Provider, root: Path) -> str 
         return None
     if rc != 0 or not isinstance(out, str):
         return None
-    for line in out.splitlines():
-        clean = line.strip()
-        if clean:
-            return clean
-    return None
+    return "\n".join(line.strip() for line in out.splitlines() if line.strip()) or None
 
 
 def _run_has_active_job(rdir: Path) -> bool:
@@ -432,6 +431,61 @@ def _run_has_active_job(rdir: Path) -> bool:
     return False
 
 
+def track_run_activity(operation):
+    """Hold an A-side run lock from generation until execution returns."""
+    @wraps(operation)
+    def tracked(**kwargs):
+        if kwargs.get("dry_run"):
+            return operation(**kwargs)
+        path = run_dir(kwargs["config"].root, kwargs["plan"].run_id)
+        path.mkdir(parents=True, exist_ok=True)
+        lock_path = path / ".controller"
+        with lock_path.open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise RunActiveError(f"run {path.name!r} is already active") from None
+            try:
+                return operation(**kwargs)
+            finally:
+                lock_path.unlink(missing_ok=True)
+                with contextlib.suppress(OSError):
+                    path.rmdir()
+
+    return tracked
+
+
+def controller_is_active(rdir: Path) -> bool:
+    try:
+        with (rdir / ".controller").open() as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    except FileNotFoundError:
+        pass
+    return False
+
+
+def run_is_active(rdir: Path) -> bool:
+    if controller_is_active(rdir) or _run_has_active_job(rdir):
+        return True
+    raw_plan = _read_json_dict(rdir / "plan.json")
+    builds = raw_plan.get("builds") if raw_plan else None
+    if not isinstance(builds, dict):
+        return False
+    build_root = rdir.parent.parent / "build"
+    return any(
+        _build_is_active(build_root / mode / key)
+        for mode, key in builds.items()
+        if isinstance(mode, str)
+        and isinstance(key, str)
+        and Path(mode).name == mode
+        and Path(key).name == key
+        and mode not in ("", ".", "..")
+        and key not in ("", ".", "..")
+    )
+
+
 def list_history(root: Path, *, limit: int | None = None) -> list[dict[str, object]]:
     """List past runs newest-first (Y-04)."""
     if limit is not None and limit < 0:
@@ -446,7 +500,7 @@ def list_history(root: Path, *, limit: int | None = None) -> list[dict[str, obje
         commit = git_data.get("commit") if isinstance(git_data, dict) else None
         dirty = git_data.get("dirty") if isinstance(git_data, dict) else None
 
-        active = _run_has_active_job(rdir)
+        active = run_is_active(rdir)
         passed: int | None = None
         total: int = 0
         duration_s: float | None = None
@@ -572,6 +626,26 @@ def case_history(
     if limit is not None:
         return entries[:limit]
     return entries
+
+
+def case_durations(root: Path) -> dict[str, float]:
+    """Return durations from the most recent completed run for each case."""
+    durations: dict[str, float] = {}
+    for _rdir, _epoch, _created, results in _sorted_run_dirs(root):
+        if not results or results.get("partial"):
+            continue
+        jobs = results.get("jobs")
+        if not isinstance(jobs, list):
+            continue
+        run_durations: dict[str, float] = {}
+        for job in jobs:
+            if isinstance(job, dict) and isinstance(case := job.get("case"), str):
+                duration = _job_duration_from_dict(job)
+                if duration > 0:
+                    run_durations[case] = max(run_durations.get(case, 0.0), duration)
+        for case, duration in run_durations.items():
+            durations.setdefault(case, duration)
+    return durations
 
 
 def job_flaky_in_history(
@@ -748,6 +822,8 @@ def prune_history(
     keep: int,
     delete: bool = True,
     dry_run: bool = False,
+    remote_run_active: Callable[[str], bool] | None = None,
+    remote_build_active: Callable[[str], bool] | None = None,
 ) -> dict[str, list[str]]:
     """Identify and optionally remove old runs beyond ``keep`` and unreferenced builds (Y-06)."""
     if isinstance(keep, bool) or not isinstance(keep, int) or keep < 0:
@@ -757,9 +833,16 @@ def prune_history(
     root = Path(root)
     sorted_runs = _sorted_run_dirs(root)
 
+    def active(path: Path) -> bool:
+        return run_is_active(path) or bool(remote_run_active and remote_run_active(path.name))
+
+    def build_active(path: Path) -> bool:
+        label = f"{path.parent.name}/{path.name}"
+        return _build_is_active(path) or bool(remote_build_active and remote_build_active(label))
+
     kept_set: set[str] = set()
     for idx, (rdir, _epoch, _created, _results) in enumerate(sorted_runs):
-        if idx < keep or _run_has_active_job(rdir):
+        if idx < keep or active(rdir):
             kept_set.add(rdir.name)
 
     kept_runs = [rdir.name for rdir, *_ in sorted_runs if rdir.name in kept_set]
@@ -799,14 +882,18 @@ def prune_history(
                     continue
                 if (mode_dir.name, key_dir.name) in referenced_builds:
                     continue
-                if _build_is_active(key_dir):
+                if build_active(key_dir):
                     continue
                 removed_builds.append(f"{mode_dir.name}/{key_dir.name}")
                 build_dirs_to_remove.append(key_dir)
 
     if delete and not dry_run:
-        for rid in removed_runs:
+        for rid in list(removed_runs):
             target = base_runs / rid
+            if active(target):
+                removed_runs.remove(rid)
+                kept_runs.append(rid)
+                continue
             if target.exists():
                 shutil.rmtree(target)
 
@@ -824,7 +911,9 @@ def prune_history(
                         latest.unlink()
 
         for bdir in build_dirs_to_remove:
-            if bdir.exists():
+            if build_active(bdir):
+                removed_builds.remove(f"{bdir.parent.name}/{bdir.name}")
+            elif bdir.exists():
                 shutil.rmtree(bdir)
 
         if removed_runs and (root / _STATS_CACHE_REL).is_file():

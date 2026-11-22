@@ -8,6 +8,7 @@ import shlex
 from collections.abc import Iterable, Mapping, Sequence
 from fnmatch import fnmatch
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from solouvm import ui
 from solouvm.errors import ConfigError, InfraError
@@ -747,7 +748,7 @@ def query_wave(
     custom_export = config.sim.get("wave_export") if hasattr(config, "sim") else None
 
     if custom_export is not None and ext != ".vcd":
-        tmp_vcd = f"{wave_path}.solouvm_tmp.vcd"
+        tmp_vcd = f"{wave_path}.solouvm-{uuid4().hex}.vcd"
         export_argv = _expand_wave_export_cmd(
             custom_export,
             wave_path=wave_path,
@@ -793,7 +794,7 @@ def query_wave(
             limit=limit,
         )
     elif ext == ".wlf":
-        tmp_vcd = f"{wave_path}.solouvm_tmp.vcd"
+        tmp_vcd = f"{wave_path}.solouvm-{uuid4().hex}.vcd"
         matched_signals, rows, truncated = _query_converted_vcd(
             provider=provider,
             wave_path=wave_path,
@@ -807,7 +808,7 @@ def query_wave(
             limit=limit,
         )
     elif ext == ".shm":
-        tmp_vcd = f"{wave_path}.solouvm_tmp.vcd"
+        tmp_vcd = f"{wave_path}.solouvm-{uuid4().hex}.vcd"
         matched_signals, rows, truncated = _query_converted_vcd(
             provider=provider,
             wave_path=wave_path,

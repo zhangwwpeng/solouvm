@@ -29,6 +29,7 @@ from dataclasses import MISSING, fields, is_dataclass
 from enum import Enum
 from pathlib import Path
 
+from solouvm.collect.cases import extract_cases
 from solouvm.errors import RecordError
 from solouvm.model import Case, validate_records
 
@@ -523,17 +524,7 @@ def _load_cases(path: Path) -> list[Case]:
     finally:
         with contextlib.suppress(ValueError):
             sys.path.remove(root)
-    found: list[object] = []
-    exported = namespace.get("CASES")
-    if exported is None and callable(namespace.get("cases")):
-        exported = namespace["cases"]()
-    elif callable(exported):
-        exported = exported()
-    if exported is not None:
-        found += list(exported)  # type: ignore[call-overload]
-    if "CASE" in namespace:
-        found.append(namespace["CASE"])
-    return [c for c in found if isinstance(c, Case)]
+    return extract_cases(namespace, path)
 
 
 def _reload(path: Path, case_name: str) -> Case:

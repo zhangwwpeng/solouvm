@@ -2,7 +2,7 @@
 
 本文定义 solouvm 读写的全部结构化文件。凡是跨进程、跨机器、跨版本传递的数据，都以本文为准。
 
-> 状态：设计稿，尚无代码。
+> 本文定义回归工件和机器可读输出的格式。
 
 ## 1. 通用规则
 
@@ -229,6 +229,7 @@ schema 不支持              → 报错（error）
 | `jobs[].category` | `design` / `execution` / `environment` / `null`（通过时） |
 | `jobs[].known` | 关联的未解决 bug（verdict.md §9） |
 | `jobs[].attempts[].wave` | 是否为带波形重跑；为 `true` 的尝试不参与最终结果 |
+| `jobs[].chosen_try` | 最终判定所用的非波形尝试编号。无可用尝试时为 `null`，旧结果可省略 |
 | `hints` | 与 case 记录相关的提示（M-22） |
 
 `results.txt` 与 JUnit XML 均由 `results.json` 派生，不单独定义。
@@ -256,13 +257,13 @@ schema 不支持              → 报错（error）
 |------|------|
 | `schema` | 外壳版本，当前为 1 |
 | `command` | 执行的命令，如 `"triage plan"` |
-| `ok` | 是否成功 |
+| `ok` | 是否正常返回命令数据；业务判定另外查看退出码和 `data` |
 | `data` | 命令自身的结果；结构见 `solouvm schema <命令>` |
 | `truncated` | `null`，或 `{"omitted": N, "more": "<继续查看的命令>"}`（N-19） |
 | `next` | 建议的下一步命令列表 |
 | `error` | `ok=false` 时存在：`code`、`message`、`file`、`line`、`hint` |
 
-流式命令（`regress` 的进度、`log -f`、`status --watch`）输出 JSON Lines，每行一个事件：`{"schema":1,"event":"job_done","job_id":"…","status":"pass",…}`，最后一行为与上表相同的外壳。
+流式命令（如 `regress` 的进度、`log -f`、`status --watch`）先输出逐行的事件对象，最后输出上表定义的 JSON 外壳。外壳可以跨多行。消费者应按顺序解码 JSON 对象并取最后一个作为命令结果。
 
 错误码稳定，只增不改（N-18）。首批：
 

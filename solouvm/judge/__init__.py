@@ -216,6 +216,7 @@ def _eval_local_attempt_worker(task: _LocalEvalTask) -> tuple[ScanResult, Verdic
                 checks=task.checks,
                 backend=task.backend,
                 expects=task.expects,
+                verdict_date=task.today,
             )
         log_read = True
     else:
@@ -285,6 +286,7 @@ def _eval_remote_attempt(
                 checks=checks,
                 backend=backend,
                 expects=case.expect,
+                verdict_date=today,
             )
             if isinstance(total_lines, int) and total_lines > scan_res.line_count:
                 scan_res = replace(scan_res, line_count=total_lines)
@@ -295,6 +297,7 @@ def _eval_remote_attempt(
                 checks=checks,
                 backend=backend,
                 expects=case.expect,
+                verdict_date=today,
             )
         log_read = True
     else:
@@ -366,6 +369,7 @@ def _resolve_build_statuses(
                         (text for _, text in provider.transport.read_lines(blog_path)),
                         checks=Checks(),
                         backend=backend,
+                        verdict_date=date.today(),
                     )
                     if blog_scan.first_error is not None:
                         error_line = blog_scan.first_error[0]
@@ -847,6 +851,17 @@ def judge_run(
     attempts_by_job = _discover_attempts(config=config, plan=plan, provider=provider)
 
     if not partial and not run_finished:
+        if any(
+            (status.facts is not None and status.facts.state == "running")
+            or provider.transport.exists(
+                _transport_path(config, provider, f".solouvm/build/{status.build_key}.lock")
+            )
+            for status in build_statuses.values()
+        ):
+            raise RunActiveError(
+                f"run {plan.run_id} is still compiling",
+                hint="pass --partial to take a snapshot or wait for compilation",
+            )
         done_marker = _transport_path(config, provider, f".solouvm/runs/{plan.run_id}/launch.done")
         launch_done = provider.transport.exists(done_marker)
         if not launch_done:
@@ -1098,6 +1113,7 @@ def judge_run(
             flaky=flaky,
             attempts=attempts_out,
             repro=repro,
+            chosen_try=chosen.try_num if non_wave else None,
         )
 
         if judge_hook is not None:

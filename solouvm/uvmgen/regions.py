@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Callable
 
 from solouvm.errors import ConfigError
 
@@ -163,7 +164,12 @@ def finalize_checksum(text: str) -> str:
     return "".join(lines)
 
 
-def merge_regions(new_text: str, old_text: str) -> tuple[str, dict[str, str], bool]:
+def merge_regions(
+    new_text: str,
+    old_text: str,
+    *,
+    preserve_body: Callable[[str, str, str], str] | None = None,
+) -> tuple[str, dict[str, str], bool]:
     """Merge preserved user-region bodies from ``old_text`` into ``new_text``.
 
     Returns ``(merged_text, orphan_regions, modified_outside_regions)``.
@@ -191,7 +197,10 @@ def merge_regions(new_text: str, old_text: str) -> tuple[str, dict[str, str], bo
         else:
             end_match = _END_RE.match(line)
             if end_match is not None:
-                preserved = old_regions.get(current_name, new_regions[current_name])
+                new_body = new_regions[current_name]
+                preserved = old_regions.get(current_name, new_body)
+                if preserve_body is not None and current_name in old_regions:
+                    preserved = preserve_body(current_name, preserved, new_body)
                 if preserved and not preserved.endswith("\n"):
                     preserved += "\n"
                 out_lines.append(preserved)

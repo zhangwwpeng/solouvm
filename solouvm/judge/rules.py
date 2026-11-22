@@ -178,7 +178,7 @@ def _rule_0a(ctx: _Ctx) -> _Hit | None:
         return _Hit("incomplete", f"build interrupted: {ctx.build_key}", "incomplete")
     if ctx.partial:
         if bf is not None and bf.state == "running":
-            return _Hit("incomplete", f"build interrupted: {ctx.build_key}", "incomplete")
+            return _Hit("incomplete", f"build still running: {ctx.build_key}", "incomplete")
         return _Hit("incomplete", f"build did not finish: {ctx.build_key}", "incomplete")
     return _Hit("error", f"build not run: {ctx.build_key}", "build")
 
@@ -190,6 +190,8 @@ def _rule_0b(ctx: _Ctx) -> _Hit | None:
         return _Hit("skip", "not run: job.facts missing", "missing")
     if ctx.stopped_early:
         return _Hit("incomplete", "not run: stopped early", "incomplete")
+    if ctx.partial:
+        return _Hit("incomplete", "not run yet: job.facts missing", "incomplete")
     return _Hit("error", "not run: job.facts missing", "missing")
 
 

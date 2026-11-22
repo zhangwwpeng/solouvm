@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import difflib
+import re
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 
 from solouvm.config.load import load_config
 from solouvm.errors import ConfigError
-from solouvm.uvmgen.pkgfiles import pkg_files_relpath, render_pkg_files
-from solouvm.uvmgen.regions import merge_regions, parse_header
+from solouvm.uvmgen.pkgfiles import merge_pkg_files, pkg_files_relpath, render_pkg_files
+from solouvm.uvmgen.regions import merge_regions, parse_header, user_regions
 from solouvm.uvmgen.render import render_component, render_tb_top
+from solouvm.uvmgen.sample import sample_body
 from solouvm.uvmgen.spec import Tbspec, load_tbspec
 
 __all__ = ["SyncReport", "uvm_diff", "uvm_sync"]
@@ -26,8 +29,38 @@ class SyncReport:
     orphans: list[Path] = field(default_factory=list)
     modified_outside: list[Path] = field(default_factory=list)
     extra_files: list[Path] = field(default_factory=list)
+    review_connections: list[Path] = field(default_factory=list)
     diff: str = ""
     dry_run: bool = False
+
+
+_DEFAULT_DRIVE = re.compile(
+    r"    @\(vif\.(?:slv_)?drv_mp\.(?:slv_)?drv_cb\);\n"
+    r"(?:"
+    r"(?:    vif\.(?:slv_)?drv_mp\.(?:slv_)?drv_cb\.[a-z][a-z0-9_]* <= '0;\n)+"
+    r"|    // (?:no signals to drive|monitor agent is passive \(UVM_PASSIVE\))\n)"
+)
+
+
+def _preserved_body(
+    path: Path, spec: Tbspec, region: str, old: str, new: str
+) -> str:
+    if region == "drive_item" and path.name.endswith("_drv.sv") and _DEFAULT_DRIVE.fullmatch(old):
+        return new
+    sample = sample_body(path, region)
+    if sample is not None and old == sample:
+        interface = spec.get_interface("axi")
+        env = spec.get_env("axi")
+        if (
+            interface is None
+            or interface.clock != "aclk"
+            or interface.reset != ("aresetn", "low")
+            or not {"awaddr", "awlen", "awvalid", "awready"} <= {s.name for s in interface.signals}
+            or env is None
+            or not {"axi_mst", "axi_slv_mon"} <= {agent.name for agent in env.agents}
+        ):
+            return new
+    return old
 
 
 def _resolve_templates_dir(root: Path, templates_dir: Path | None) -> Path | None:
@@ -315,6 +348,7 @@ def uvm_sync(
     _merge_svh_entries(target_rendered, root_path, spec, known_user_paths)
 
     report = SyncReport(dry_run=dry_run)
+    pending_writes: dict[Path, str] = {}
     diff_chunks: list[str] = []
 
     for rel in sorted(target_rendered, key=lambda p: p.as_posix()):
@@ -325,13 +359,12 @@ def uvm_sync(
             chunk = _unified_diff(rel, None, new_text)
             if chunk:
                 diff_chunks.append(chunk)
-            if not dry_run:
-                abs_path.parent.mkdir(parents=True, exist_ok=True)
-                abs_path.write_text(new_text, encoding="utf-8")
+            pending_writes[abs_path] = new_text
             continue
 
         old_text = abs_path.read_text(encoding="utf-8")
         if rel.suffix == ".svh":
+            new_text = merge_pkg_files(new_text, old_text)
             if new_text == old_text:
                 report.unchanged.append(rel)
             else:
@@ -339,11 +372,18 @@ def uvm_sync(
                 chunk = _unified_diff(rel, old_text, new_text)
                 if chunk:
                     diff_chunks.append(chunk)
-                if not dry_run:
-                    abs_path.write_text(new_text, encoding="utf-8")
+                pending_writes[abs_path] = new_text
             continue
 
-        merged_text, orphan_dict, modified_outside = merge_regions(new_text, old_text)
+        merged_text, orphan_dict, modified_outside = merge_regions(
+            new_text,
+            old_text,
+            preserve_body=partial(_preserved_body, rel, spec),
+        )
+        if rel.name == "tb_top.sv":
+            old_dut = user_regions(old_text).get("dut", "")
+            if old_dut.strip() and merged_text != old_text:
+                report.review_connections.append(rel)
         if modified_outside:
             report.modified_outside.append(rel)
             chunk = _unified_diff(rel, old_text, merged_text)
@@ -354,15 +394,11 @@ def uvm_sync(
         if orphan_dict:
             orphan_rel = Path(f"{rel.as_posix()}.orphan")
             report.orphans.append(orphan_rel)
-            if not dry_run:
-                orphan_abs = root_path / orphan_rel
-                existing_orphan = (
-                    orphan_abs.read_text(encoding="utf-8") if orphan_abs.is_file() else None
-                )
-                orphan_abs.write_text(
-                    _merge_orphan_text(existing_orphan, orphan_dict),
-                    encoding="utf-8",
-                )
+            orphan_abs = root_path / orphan_rel
+            existing_orphan = (
+                orphan_abs.read_text(encoding="utf-8") if orphan_abs.is_file() else None
+            )
+            pending_writes[orphan_abs] = _merge_orphan_text(existing_orphan, orphan_dict)
 
         if merged_text == old_text:
             report.unchanged.append(rel)
@@ -371,8 +407,7 @@ def uvm_sync(
             chunk = _unified_diff(rel, old_text, merged_text)
             if chunk:
                 diff_chunks.append(chunk)
-            if not dry_run:
-                abs_path.write_text(merged_text, encoding="utf-8")
+            pending_writes[abs_path] = merged_text
 
     expected_all = set(all_rendered) | known_user_paths
     verif_dir = root_path / "verif"
@@ -385,6 +420,10 @@ def uvm_sync(
                 report.extra_files.append(rel)
 
     report.diff = "".join(diff_chunks)
+    if not dry_run:
+        for path, text in pending_writes.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
     return report
 
 

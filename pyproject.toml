@@ -25,6 +25,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["solouvm"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"doc" = "solouvm/_docs"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

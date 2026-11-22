@@ -22,7 +22,7 @@ class ${env}_${test}_test extends ${env}_base_test;
 
   virtual task run_phase(uvm_phase phase);
     ${env}_base_vseq vseq;
-    phase.phase_done.set_drain_time(this, 1us);
+    phase.get_objection().set_drain_time(this, 1us);
     phase.raise_objection(this);
     // solouvm:user begin run_phase
     vseq = ${env}_base_vseq::type_id::create("vseq");

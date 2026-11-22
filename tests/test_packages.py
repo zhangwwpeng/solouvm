@@ -473,7 +473,12 @@ CASES = [
     assert main(["-c", str(proj), "--role", "triage", "--json", "pkg", "sync"]) == 2
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "ROLE_DENIED"
 
-    # files auto-clones apb_vip and lists package source + relative path
+    for command in (["files"], ["validate"], ["regress", "--dry-run"]):
+        assert main(["-c", str(proj), "--json", *command]) == 2
+        capsys.readouterr()
+        assert not (proj / ".solouvm/packages/apb_vip").exists()
+    assert main(["-c", str(proj), "--json", "pkg", "sync"]) == 0
+    capsys.readouterr()
     assert main(["-c", str(proj), "--json", "files"]) == 0
     files_data = json.loads(capsys.readouterr().out)["data"]
     assert files_data["entries"][0]["path"] == ".solouvm/packages/apb_vip/src/apb_pkg.sv"

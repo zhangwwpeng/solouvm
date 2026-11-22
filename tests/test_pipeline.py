@@ -612,7 +612,7 @@ def test_regress_detach_respects_budget_s(tmp_path: Path) -> None:
         detach=True,
         budget_s=0.5,
     )
-    assert code == 0 and payload is None
+    assert code == 0 and payload == {"run_id": "r-det-budget", "detached": True}
 
     deadline = time.monotonic() + 8.0
     while time.monotonic() < deadline and _launch_pid_alive(prov, "r-det-budget"):

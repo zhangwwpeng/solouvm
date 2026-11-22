@@ -667,6 +667,10 @@ log_file="$run_dir/launch.log"
 rm -f "$done_file"
 
 if [ "$detach" -eq 1 ]; then
+    if ! : >> "$pid_file" || ! : >> "$log_file"; then
+        echo "solouvm: error: cannot record background submission in $run_dir" >&2
+        exit 2
+    fi
     set -m
     nohup bash -c '
         done_f="$1"
@@ -678,7 +682,10 @@ if [ "$detach" -eq 1 ]; then
     ' _ "$done_file" "${cmd[@]}" </dev/null >"$log_file" 2>&1 &
     pgid=$!
     set +m
-    printf '%s %s\n' "$host" "$pgid" > "$pid_file"
+    if ! printf '%s %s\n' "$host" "$pgid" > "$pid_file"; then
+        kill -TERM -"$pgid" 2>/dev/null || true
+        exit 2
+    fi
     if [ -n "$budget_s" ] && LC_ALL=C awk "BEGIN {exit !($budget_s > 0)}"; then
         nohup bash -c '
             sleep "$1"

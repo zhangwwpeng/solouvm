@@ -2,7 +2,7 @@
 
 所有由 solouvm 生成、或在 solouvm 项目中编写的 UVM 验证环境，都遵守同一套结构与写法。本文是这套规范的唯一出处：solouvm 的生成模板按它实现，`lint-style` 按它检查，它也作为系统文档的一部分交给 AI。
 
-> 状态：初稿，尚无代码。条目可以按团队习惯调整，但调整后所有环境一起遵守，不允许某个环境例外。规范带版本号，当前为 `style 1`。
+> 当前模板采用 `style 1`。团队调整规范后，同一项目中的环境应遵循同一套约定。
 
 ## 1. 为什么要统一
 
@@ -236,7 +236,7 @@ endtask
 `verif/tb/tb_top.sv` 由 `solouvm new env` 生成，属于 `top` 组。结构固定：
 
 1. `timeunit` / `timeprecision` 声明；
-2. 时钟与复位生成，周期与复位时长来自 `tbspec.py`；
+2. 时钟与复位生成。`tbspec.py` 指定信号名和复位极性，模板默认时钟周期为 `10ns`，复位在 `20ns` 释放；
 3. 例化每个 interface，按 `tbspec.py` 连接到 DUT；
 4. 例化 DUT（用户代码区，因为 DUT 端口连接因项目而异）；
 5. `initial` 中用 `uvm_config_db` 设置各 vif（键为 `"vif"`，§4），然后调用 `run_test()`。

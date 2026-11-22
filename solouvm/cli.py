@@ -21,9 +21,16 @@ from solouvm.collect import collect_cases
 from solouvm.completion import generate_completion
 from solouvm.config import Config, find_config, load_config
 from solouvm.cov import cov_merge, cov_report
-from solouvm.errors import ConfigError, SolouvmError
+from solouvm.errors import ConfigError, RunActiveError, SolouvmError
 from solouvm.explain import explain, explain_data
-from solouvm.history import case_history, list_history, resolve_run_id, run_dir
+from solouvm.history import (
+    case_durations,
+    case_history,
+    list_history,
+    resolve_run_id,
+    run_dir,
+    run_is_active,
+)
 from solouvm.init import init_project
 from solouvm.judge import judge_exit_code, judge_run, write_results
 from solouvm.notes import (
@@ -195,7 +202,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
 
 def _cmd_files(args: argparse.Namespace) -> int:
     config, _ = _load_ctx(args)
-    flist = collect_project_files(config)
+    flist = collect_project_files(config, auto_fetch=False)
     rows = [
         [e.group, e.path + (" [OUTSIDE ROOT]" if e.outside_root else ""), e.source]
         for e in flist.entries
@@ -269,6 +276,7 @@ def _cmd_list(args: argparse.Namespace) -> int:
         allow_empty=args.allow_empty,
         force=True,
         order=args.order,
+        durations=case_durations(config.root) if args.order == "duration" else None,
         shard=args.shard,
         on_warning=warns.append,
         rng_seed=getattr(args, "shard_seed", None),
@@ -352,6 +360,7 @@ def _cmd_uvm_sync(args: argparse.Namespace) -> int:
         "orphans": [p.as_posix() for p in rep.orphans],
         "modified_outside": [p.as_posix() for p in rep.modified_outside],
         "extra_files": [p.as_posix() for p in rep.extra_files],
+        "review_connections": [p.as_posix() for p in rep.review_connections],
         "diff": rep.diff,
     }
     if ui.is_json_mode():
@@ -359,6 +368,8 @@ def _cmd_uvm_sync(args: argparse.Namespace) -> int:
         return 0
     if args.dry_run and rep.diff:
         ui.info(rep.diff)
+    for path in rep.review_connections:
+        ui.warning(f"review DUT connections in {path}")
     ui.summary(
         f"uvm sync: {len(rep.updated)} updated, {len(rep.created)} created, "
         f"{len(rep.orphans)} orphan, {len(rep.modified_outside)} outside edits"
@@ -414,6 +425,9 @@ def _plan_for_exec(config: Config, provider: Provider, args: argparse.Namespace)
             allow_empty=getattr(args, "allow_empty", False),
             force=getattr(args, "force", False),
             order=getattr(args, "order", "name"),
+            durations=(
+                case_durations(config.root) if getattr(args, "order", None) == "duration" else None
+            ),
             shard=getattr(args, "shard", None),
             on_warning=warns.append,
             rng_seed=getattr(args, "shard_seed", None),
@@ -431,8 +445,8 @@ def _plan_for_exec(config: Config, provider: Provider, args: argparse.Namespace)
 
 def _cmd_gen(args: argparse.Namespace) -> int:
     config, provider = _load_ctx(args)
-    plan = _plan_for_exec(config, provider, args)
     flist = collect_project_files(config)
+    plan = _plan_for_exec(config, provider, args)
     res = pipeline.gen(
         config=config,
         plan=plan,
@@ -451,8 +465,8 @@ def _cmd_gen(args: argparse.Namespace) -> int:
 
 def _cmd_build(args: argparse.Namespace) -> int:
     config, provider = _load_ctx(args)
+    flist = collect_project_files(config, auto_fetch=not args.dry_run)
     plan = _plan_for_exec(config, provider, args)
-    flist = collect_project_files(config)
     res = pipeline.build(
         config=config,
         plan=plan,
@@ -484,8 +498,8 @@ def _run_or_regress(args: argparse.Namespace, *, require_selector: bool) -> int:
     config, provider = _load_ctx(args)
     budget_s = _parse_budget_arg(getattr(args, "budget", None))
     max_fail = _validate_max_fail(getattr(args, "max_fail", None))
+    flist = collect_project_files(config, auto_fetch=not args.dry_run)
     plan = _plan_for_exec(config, provider, args)
-    flist = collect_project_files(config)
     _results, payload, code = pipeline.run_regression(
         config=config,
         plan=plan,
@@ -503,10 +517,8 @@ def _run_or_regress(args: argparse.Namespace, *, require_selector: bool) -> int:
     )
     cmd_label = "run" if require_selector else "regress"
     if ui.is_json_mode():
-        if args.dry_run:
+        if args.dry_run or args.detach:
             output.emit_json(cmd_label, payload)
-        elif args.detach:
-            output.emit_json(cmd_label, {"run_id": plan.run_id, "detached": True})
         else:
             output.emit_json(
                 cmd_label,
@@ -515,7 +527,7 @@ def _run_or_regress(args: argparse.Namespace, *, require_selector: bool) -> int:
             )
     elif args.dry_run and payload is not None:
         ui.summary("\n".join(str(c) for c in payload.get("commands", [])))
-    elif args.detach:
+    elif args.detach and code == 0:
         ui.summary(f"started detached run {plan.run_id}")
         output.emit_next([f"solouvm status --run {plan.run_id}"])
     return code
@@ -546,13 +558,13 @@ def _cmd_rerun(args: argparse.Namespace) -> int:
         dry_run=args.dry_run,
         rebuild=args.rebuild,
         verbose=args.verbose,
+        force=args.force,
     )
     if ui.is_json_mode():
-        data = {"run_id": new_plan.run_id, "detached": True} if args.detach else payload
-        output.emit_json("rerun", data)
+        output.emit_json("rerun", payload)
     elif args.dry_run and payload is not None:
         ui.summary("\n".join(str(c) for c in payload.get("commands", [])))
-    elif args.detach:
+    elif args.detach and code == 0:
         ui.summary(f"started rerun {new_plan.run_id}")
     return code
 
@@ -713,6 +725,14 @@ def _cmd_judge(args: argparse.Namespace) -> int:
     rdir = run_dir(config.root, actual_run)
     provider, plan = _resolve_run_provider(config, provider, args, actual_run)
     root = Path(config.root)
+    if not args.partial and (
+        run_is_active(rdir)
+        or pipeline.status_run(config=config, provider=provider, run_id=actual_run)["active"]
+    ):
+        raise RunActiveError(
+            f"run {actual_run!r} is still active",
+            hint="wait for completion or pass --partial",
+        )
     started = time.monotonic()
     jobs_desc = f"{len(plan.jobs)} job" if len(plan.jobs) == 1 else f"{len(plan.jobs)} jobs"
     with ui.live_runner(f"judge {actual_run}"):

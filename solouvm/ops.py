@@ -391,7 +391,7 @@ def validate_project(
     pkg_error = False
     if config.packages:
         try:
-            pkgs = resolve_packages(config, auto_fetch=True)
+            pkgs = resolve_packages(config, auto_fetch=False)
         except SolouvmError as exc:
             pkg_error = True
             issues.append(
@@ -1313,15 +1313,16 @@ def show_help(topic: str | None = None, *, root: Path | None = None) -> dict[str
         raise ConfigError(f"unknown help topic {topic!r}", code="CFG_INVALID", hint=hint)
 
     doc_name = HELP_TOPICS[key]
-    search_roots = [Path(__file__).resolve().parent.parent]
+    package_dir = Path(__file__).resolve().parent
+    doc_dirs = [package_dir.parent / "doc", package_dir / "_docs"]
     if root is not None:
-        search_roots.insert(0, Path(root))
+        doc_dirs.insert(0, Path(root) / "doc")
     env_doc = os.environ.get("SOLOUVM_DOC_DIR")
     if env_doc:
-        search_roots.insert(0, Path(env_doc).parent)
+        doc_dirs.insert(0, Path(env_doc))
 
-    for base in search_roots:
-        candidate = base / "doc" / doc_name
+    for doc_dir in doc_dirs:
+        candidate = doc_dir / doc_name
         if candidate.is_file():
             return {
                 "topic": key,

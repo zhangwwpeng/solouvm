@@ -47,6 +47,6 @@ CLI 命令行参数 > 环境变量 > solouvm.local.py (LOCAL) > solouvm.conf.py 
 - `+incdir+<dir>`、`+define+<MACRO>`、`-y <dir>`、`-v <file>`、`+libext+<ext>`。
 - `-f <path>` / `-F <path>` 递归导入已有文件清单（`-f` 相对调用目录，`-F` 相对 `.f` 自身所在目录）。
 - `${VAR}` / `$VAR` 环境变量：收集期保留原文，运行前校验变量是否已定义；各商业仿真器在 `.f` 中的实际展开差异见 [requirements.md §26](../requirements.md#26-不确定事项) 第 8 项。
-- **根外路径**：引用项目根目录之外的路径会照常收集，并在 `solouvm files` 中标记 `[OUTSIDE ROOT]`。若启用远程跨机执行且使用了根外路径，同步前需特别核查远端可达性。
+- **根外路径**：本机或共享文件系统可引用项目根以外的源码。`rsync` 执行前会拒绝无法由项目树传输的编译输入。使用 `rsync` 时，将源码和 include 目录放入项目树。
 
 > 提示：编译键哈希包含所有收集输入（含 `incdir` 目录）及排序后的 `FILES` 与相关配置；编译键排除规则（`F-09`）当前为 **待定**。

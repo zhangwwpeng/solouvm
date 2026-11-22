@@ -806,3 +806,4 @@ class Result:
     flaky: bool = False
     attempts: list[dict[str, object]] = field(default_factory=list)
     repro: dict[str, str] = field(default_factory=dict)
+    chosen_try: int | None = None

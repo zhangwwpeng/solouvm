@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -180,7 +181,11 @@ def _clone_repo(repo: str, ref: str | None, clone_dir: Path) -> str:
                     f"git fetch {repo!r} at {ref!r} failed: "
                     f"{detail or f'exit code {failed.returncode}'}",
                     code="PROVIDER_FAILED",
-                    hint=_OFFLINE_HINT,
+                    hint=(
+                        "pass the full commit hash or use a branch or tag"
+                        if re.fullmatch(r"[0-9a-fA-F]{4,39}", ref)
+                        else _OFFLINE_HINT
+                    ),
                 )
 
     rev_proc = _run_git_cmd(["rev-parse", "--short", "HEAD"], cwd=clone_dir)

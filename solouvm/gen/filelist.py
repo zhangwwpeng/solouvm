@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import posixpath
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -31,6 +32,12 @@ def _resolve_in_root(root: Path, resolved_root: Path, raw: str) -> tuple[str, bo
         return raw, True
 
 
+def _quote_token(token: str) -> str:
+    if re.search(r'\s|["\']', token):
+        return '"' + token.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return token
+
+
 def _format_path(
     root: Path,
     resolved_root: Path,
@@ -41,16 +48,16 @@ def _format_path(
 ) -> str:
     check_no_newlines(raw, field="filelist path")
     if "$" in raw:
-        return raw
+        return _quote_token(raw)
     if os.path.isabs(raw):
         if outside is True:
-            return raw
+            return _quote_token(raw)
         root_rel, is_outside = _resolve_in_root(root, resolved_root, raw)
         if is_outside:
-            return raw
-        return root_rel if base_rel == "." else relpath(root_rel, base_rel)
+            return _quote_token(raw)
+        return _quote_token(root_rel if base_rel == "." else relpath(root_rel, base_rel))
     norm_rel = posixpath.normpath(raw.replace("\\", "/"))
-    return norm_rel if base_rel == "." else relpath(norm_rel, base_rel)
+    return _quote_token(norm_rel if base_rel == "." else relpath(norm_rel, base_rel))
 
 
 def _dedupe_directives(lines: list[str]) -> list[str]:
@@ -78,7 +85,7 @@ def _build_lines(
     global_lines: list[str] = []
     for define in extra_defines:
         check_no_newlines(define, field="defines")
-        global_lines.append(f"+define+{define}")
+        global_lines.append(_quote_token(f"+define+{define}"))
     for incdir in extra_incdirs:
         formatted = _format_path(root, resolved_root, incdir, base_rel)
         global_lines.append(f"+incdir+{formatted}")
@@ -90,7 +97,7 @@ def _build_lines(
         group_raw: list[str] = []
         for define in files.defines.get(group, []):
             check_no_newlines(define, field=f"files.defines[{group!r}]")
-            group_raw.append(f"+define+{define}")
+            group_raw.append(_quote_token(f"+define+{define}"))
         for incdir in files.incdirs.get(group, []):
             formatted = _format_path(root, resolved_root, incdir, base_rel)
             group_raw.append(f"+incdir+{formatted}")

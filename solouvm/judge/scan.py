@@ -6,8 +6,10 @@ import re
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from datetime import date
 from typing import TYPE_CHECKING
 
+from solouvm.judge.waivers import SEVERITIES, WaiverAccumulator, WaiverResult
 from solouvm.units import parse_sim_time_ns
 
 if TYPE_CHECKING:
@@ -15,8 +17,6 @@ if TYPE_CHECKING:
     from solouvm.model import Checks, Expect
 
 __all__ = ["SEVERITIES", "ScanResult", "scan"]
-
-SEVERITIES = ("INFO", "WARNING", "ERROR", "FATAL")
 
 _SUMMARY_HEADER = "** Report counts by severity"
 _SUMMARY_COUNT = re.compile(r"^\s*UVM_(INFO|WARNING|ERROR|FATAL)\s*:\s*(\d+)\s*$")
@@ -53,6 +53,7 @@ class ScanResult:
     scoreboard: dict[str, int] = field(default_factory=dict)
     # expect 正则 -> (匹配行数, 最后一次匹配的第 1 个捕获分组)
     expect_hits: dict[str, tuple[int, str | None]] = field(default_factory=dict)
+    waiver_result: WaiverResult | None = None
 
 
 def scan(
@@ -61,6 +62,7 @@ def scan(
     checks: Checks,
     backend: Backend,
     expects: Iterable[Expect] = (),
+    verdict_date: date | None = None,
 ) -> ScanResult:
     """Scan a log once, line by line, collecting everything the verdict rules need."""
     error_res = _compile(backend.error_regex)
@@ -78,6 +80,10 @@ def scan(
     expect_counts: Counter[str] = Counter()
     expect_last: dict[str, str | None] = {}
     uvm_msgs: list[tuple[int, str, str | None, str]] = []
+    accumulator = (
+        WaiverAccumulator(checks.waivers, verdict_date) if verdict_date is not None else None
+    )
+    sim_count = 0
     scoreboard: dict[str, int] = {}
 
     summary_counts: dict[str, int] = {}
@@ -101,6 +107,7 @@ def scan(
     for lineno, raw in enumerate(lines, 1):
         line_count = lineno
         line = raw.rstrip("\r\n")
+        uvm_message: tuple[int, str, str | None, str] | None = None
         failing = False  # 本行是否是"会导致失败"的行
 
         if "UVM_" in line:
@@ -115,13 +122,14 @@ def scan(
                     is_uvm = True
                     severity = msg.group(1)
                     line_counts[severity] += 1
-                    uvm_lines.setdefault(severity, []).append(lineno)
+                    if accumulator is None:
+                        uvm_lines.setdefault(severity, []).append(lineno)
                     if severity in ("ERROR", "FATAL"):
                         failing = True
                     time_id = _UVM_TIME_ID.search(line, msg.end())
                     msg_id = time_id.group(2) if time_id else None
                     if severity != "INFO":
-                        uvm_msgs.append((lineno, severity, msg_id, line))
+                        uvm_message = (lineno, severity, msg_id, line)
                     if time_id:
                         last_uvm_id = msg_id
                         if severity == "INFO":
@@ -147,14 +155,36 @@ def scan(
             if marker:
                 done_marker = marker.group(1)
 
-        if _any(error_res, line):
-            sim_errors.append((lineno, line))
+        is_sim_error = _any(error_res, line)
+        if is_sim_error:
+            sim_count += 1
             if sim_errors_count:
                 failing = True
+        if accumulator is None:
+            if uvm_message is not None:
+                uvm_msgs.append(uvm_message)
+            if is_sim_error:
+                sim_errors.append((lineno, line))
+        else:
+            uvm_waived = (
+                uvm_message is not None
+                and accumulator.match(uvm_message[1], uvm_message[2], line)
+            )
+            sim_waived = is_sim_error and accumulator.match("SIM", None, line)
+            if not uvm_waived and not sim_waived:
+                if is_sim_error and not sim_errors:
+                    sim_errors.append((lineno, line))
+                if (
+                    uvm_message is not None
+                    and uvm_message[1] in ("ERROR", "FATAL")
+                    and not uvm_msgs
+                ):
+                    uvm_msgs.append(uvm_message)
         if _any(fail_res, line):
-            fail_hits.append((lineno, line))
+            if accumulator is None or not fail_hits:
+                fail_hits.append((lineno, line))
             failing = True
-        if pass_res and _any(pass_res, line):
+        if (accumulator is None or not pass_hits) and _any(pass_res, line):
             pass_hits.append((lineno, line))
         if env_fail is None and _any(env_res, line):
             env_fail = (lineno, line)
@@ -199,6 +229,7 @@ def scan(
         uvm_msgs=uvm_msgs,
         scoreboard=scoreboard,
         expect_hits={p: (expect_counts[p], expect_last.get(p)) for p in expect_res},
+        waiver_result=accumulator.finish(uvm_counts, sim_count) if accumulator else None,
     )
 
 

@@ -11,6 +11,7 @@ from solouvm import Case, Expect
 from solouvm.collect.cases import collect_cases
 from solouvm.config.load import load_config
 from solouvm.errors import ConfigError, InfraError
+from solouvm.init import init_project
 from solouvm.uvm import Agent, Env, Field, Interface, Signal
 from solouvm.uvmgen import (
     compute_checksum,
@@ -312,6 +313,27 @@ def test_render_determinism() -> None:
     first = render_component("env", "axi", spec)
     second = render_component("env", "axi", spec)
     assert first == second
+
+
+def test_sync_and_new_preserve_explicit_include_block(tmp_path: Path) -> None:
+    init_project(root=tmp_path, simulator="fake")
+    agent_dir = tmp_path / "verif/agents/axi_mst"
+    manifest = agent_dir / "axi_mst_files.svh"
+    (agent_dir / "local_defs.svh").write_text("// Local definitions\n", encoding="utf-8")
+    block = (
+        "// solouvm:files begin\n"
+        '`include "agents/axi_mst/local_defs.svh"\n'
+        "// solouvm:files end\n"
+    )
+    original = manifest.read_text(encoding="utf-8")
+    first_line, generated = original.split("\n", 1)
+    manifest.write_text(first_line + "\n" + block + generated, encoding="utf-8")
+
+    uvm_sync(tmp_path)
+    create_component(tmp_path, "seq", "extra", agent_name="axi_mst")
+
+    assert manifest.read_text(encoding="utf-8").startswith(first_line + "\n" + block)
+    assert find_svh_inconsistencies(tmp_path) == []
 
 
 def test_new_env_with_agents_and_tb_top(tmp_path: Path) -> None:

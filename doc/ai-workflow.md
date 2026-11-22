@@ -2,7 +2,7 @@
 
 solouvm 由人和 AI 共用同一套命令（N-16）。本文描述以 AI 为主力时的标准工作流：主 agent 写 case、提交回归；子 agent 独立分诊；主 agent 审查后决定下一步。需求编号见 [requirements.md](requirements.md) 的 AI 区。
 
-> 状态：设计稿，尚无代码。本文不绑定具体的 agent 框架；附录给出 Claude Code 的示例配置。
+> 本文描述与 agent 框架无关的分诊工作流，附录给出 Claude Code 的示例配置。
 
 ## 1. 角色
 

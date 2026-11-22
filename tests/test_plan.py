@@ -91,7 +91,7 @@ def test_case_seeds_deduplicated(tmp_path: Path) -> None:
     assert [j.seed for j in plan.jobs] == [1, 2]
 
 
-def test_seed_priority_case_over_cli_over_config(tmp_path: Path) -> None:
+def test_seed_priority_cli_over_case_over_config(tmp_path: Path) -> None:
     cfg = _make_config(tmp_path)
     cases = [
         Case(name="c_case", seeds=[100]),
@@ -99,13 +99,14 @@ def test_seed_priority_case_over_cli_over_config(tmp_path: Path) -> None:
     ]
     plan_cli = build_plan(cases=cases, config=cfg, selection={"seeds": "7,8"}, run_id="r1")
     assert [(j.case, j.seed) for j in plan_cli.jobs] == [
-        ("c_case", 100),
+        ("c_case", 7),
+        ("c_case", 8),
         ("c_default", 7),
         ("c_default", 8),
     ]
 
     plan_single = build_plan(
-        cases=[Case(name="c_default")],
+        cases=[Case(name="c_default", seeds=[11, 22])],
         config=cfg,
         selection={"seed": 42},
         run_id="r2",

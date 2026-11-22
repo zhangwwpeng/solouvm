@@ -21,7 +21,7 @@ from solouvm import __version__, hooks, output, ui
 from solouvm.backends import fake_sim_source, resolve_sim_backend
 from solouvm.buildkey import compute_build_keys
 from solouvm.collect import collect_cases
-from solouvm.errors import BuildError, ConfigError, InfraError
+from solouvm.errors import BuildError, ConfigError, InfraError, RunActiveError
 from solouvm.gen import (
     render_launch,
     render_run_job,
@@ -29,11 +29,14 @@ from solouvm.gen import (
 )
 from solouvm.history import (
     capture_env,
+    controller_is_active,
     detect_sim_version,
     prune_history,
     resolve_run_id,
     run_dir,
+    run_is_active,
     runs_dir,
+    track_run_activity,
     update_latest_link,
     write_env,
 )
@@ -41,8 +44,9 @@ from solouvm.judge import judge_completed_attempt, judge_exit_code, judge_run, w
 from solouvm.judge.facts import FactsError, parse_facts
 from solouvm.model import Bug, Case, Facts, Job, Plan, Result
 from solouvm.packages import collect_project_files, package_sync_files
-from solouvm.plan import read_plan, write_plan
+from solouvm.plan import enforce_job_limit, read_plan, write_plan
 from solouvm.providers import get_provider
+from solouvm.providers.sync_rsync import RsyncSync
 from solouvm.providers.transport_local import LocalTransport
 from solouvm.report.json import PASS_STATUSES, read_results_json
 from solouvm.report.text import render_text
@@ -103,6 +107,8 @@ def _preview_gen(
         eff_sim_version = "FAKE-SIM 1.0"
     elif type(provider.transport) is LocalTransport:
         eff_sim_version = detect_sim_version(backend, provider, root)
+    else:
+        eff_sim_version = f"unverified:{plan.run_id}"
 
     used_modes = sorted({job.build for job in plan.jobs} or set(plan.builds))
     bk = compute_build_keys(
@@ -277,10 +283,12 @@ def gen(
         _stage_bin_scripts(root, solouvm_version)
 
         eff_sim_version = sim_version
-        if eff_sim_version is None and (
-            type(eff_provider.transport) is LocalTransport or backend.name == "fake"
-        ):
+        if eff_sim_version is None and backend.name == "fake":
+            eff_sim_version = "FAKE-SIM 1.0"
+        elif eff_sim_version is None:
             eff_sim_version = detect_sim_version(backend, eff_provider, root)
+        if eff_sim_version is None and type(eff_provider.transport) is not LocalTransport:
+            eff_sim_version = f"unverified:{plan.run_id}"
 
         used_modes = sorted({job.build for job in plan.jobs} or set(plan.builds))
         bk = compute_build_keys(
@@ -448,7 +456,40 @@ def _check_build_outputs(
         )
 
 
-def _push_generated(config: Config, provider: Provider, manifest: Sequence[str]) -> None:
+def _check_sync_inputs(config: Config, provider: Provider, files: FileList) -> None:
+    if not isinstance(provider.sync, RsyncSync):
+        return
+    root = Path(config.root).resolve()
+    paths = [
+        *(entry.path for entry in files.entries),
+        *(path for group in files.incdirs.values() for path in group),
+        *(lib[3:] for group in files.libs.values() for lib in group
+          if lib.startswith(("-v ", "-y "))),
+        *config.incdirs,
+        *(path for build in config.builds.values() for path in build.incdirs),
+    ]
+    for path in paths:
+        if "$" in path or not (root / path).resolve().is_relative_to(root):
+            raise ConfigError(
+                f"rsync cannot transfer compile input {path!r} outside the project tree",
+                code="CFG_INVALID",
+                hint="move the input inside the project or use an explicitly shared filesystem",
+            )
+
+
+def _push_generated(
+    config: Config, provider: Provider, manifest: Sequence[str], files: FileList
+) -> None:
+    if isinstance(provider.sync, RsyncSync):
+        _check_sync_inputs(config, provider, files)
+        root = Path(config.root).absolute()
+        source_paths = []
+        for entry in files.entries:
+            source = Path(os.path.normpath(root / entry.path))
+            if not source.is_relative_to(root):
+                source = root / source.resolve().relative_to(root.resolve())
+            source_paths.append(source.relative_to(root).as_posix())
+        manifest = [*manifest, *source_paths]
     provider.sync.push(provider.transport, str(config.root), manifest)
     # Sync implementations like NoneSync skip file writes; ssh+none shares disk. Ensure ssh
     # without shared FS still gets generated artifacts when sync kind is neither git nor rsync
@@ -833,6 +874,7 @@ def _run_gen_and_push_stages(
     emit_json_events: bool,
 ) -> list[str]:
     """Run Stage 1 (gen) and Stage 2 (push) with stage banners and A-side hooks."""
+    _check_sync_inputs(config, provider, files)
     root = Path(config.root)
     jobs_desc = _plural_jobs(len(plan.jobs))
     with _pipeline_stage(
@@ -877,7 +919,7 @@ def _run_gen_and_push_stages(
             extra={"manifest": manifest},
             emit_json_events=emit_json_events,
         )
-        _push_generated(config, provider, manifest)
+        _push_generated(config, provider, manifest, files)
         hooks.run_hook(
             phase="post",
             stage="push",
@@ -990,6 +1032,7 @@ def _run_build_phase(
     return rc, stopped_early, False
 
 
+@track_run_activity
 def build(
     *,
     config: Config,
@@ -1009,7 +1052,10 @@ def build(
     selected_modes = list(modes) if modes else sorted(plan.builds or {j.build for j in plan.jobs})
     if rebuild and _skip_gen:
         _skip_gen = False
-    eff_files = files if files is not None else collect_project_files(config)
+    eff_files = (
+        files if files is not None else collect_project_files(config, auto_fetch=not dry_run)
+    )
+    _check_sync_inputs(config, provider, eff_files)
 
     if dry_run:
         if not _skip_gen:
@@ -1081,7 +1127,7 @@ def build(
                     extra={"manifest": manifest},
                     emit_json_events=True,
                 )
-                _push_generated(config, provider, manifest)
+                _push_generated(config, provider, manifest, eff_files)
                 hooks.run_hook(
                     phase="post",
                     stage="push",
@@ -1804,6 +1850,7 @@ def _run_stage_followup(
     return stopped_early
 
 
+@track_run_activity
 def run_regression(
     *,
     config: Config,
@@ -1847,6 +1894,17 @@ def run_regression(
             code="CFG_INVALID",
         )
 
+    if detach:
+        has_retry = retry > 0 if retry is not None else any(job.retry > 0 for job in plan.jobs)
+        if eff_max_fail is not None or has_retry or (not wave and config.regress.wave_on_fail):
+            raise ConfigError(
+                "detached runs do not support max_fail, retries, or wave_on_fail",
+                code="CFG_INVALID",
+                hint="run in the foreground or disable those policies",
+            )
+        if eff_budget == 0:
+            raise ConfigError("detached run requires a positive budget", code="CFG_INVALID")
+
     reg_started = time.monotonic()
     deadline = (reg_started + eff_budget) if eff_budget is not None else None
     root = Path(config.root)
@@ -1863,6 +1921,7 @@ def run_regression(
     ]
 
     if dry_run:
+        _check_sync_inputs(config, provider, files)
         manifest = _preview_gen(
             config=config,
             plan=plan,
@@ -1939,7 +1998,7 @@ def run_regression(
                 st_run["ok"] = False
             else:
                 st_run["detail"] = "submitted in background"
-        return [], None, 1 if det_stopped else 0
+        return [], {"run_id": plan.run_id, "detached": not det_stopped}, 1 if det_stopped else 0
 
     eff_verbose = max(verbose, ui.verbosity())
     stream_logs = (ui.is_tty() or eff_verbose >= 1) and not ui.is_json_mode() and not ui.is_quiet()
@@ -2230,7 +2289,9 @@ def run(
     verbose: int = 0,
 ) -> int:
     """Execute ``solouvm run`` and return its exit code (0/1/2/130)."""
-    eff_files = files if files is not None else collect_project_files(config)
+    eff_files = (
+        files if files is not None else collect_project_files(config, auto_fetch=not dry_run)
+    )
     _, _, exit_code = run_regression(
         config=config,
         plan=plan,
@@ -2437,6 +2498,7 @@ def rerun(
     dry_run: bool = False,
     rebuild: bool = False,
     verbose: int = 0,
+    force: bool = False,
 ) -> tuple[Plan, list[Result], dict[str, object] | None, int]:
     """Build a seed-preserving rerun plan (or ``--note CASE#ID``) and run it (R-02, M-12)."""
     root = Path(config.root)
@@ -2458,7 +2520,8 @@ def rerun(
                 failed=failed,
                 statuses=statuses,
             )
-        files = collect_project_files(config)
+        enforce_job_limit(config, len(new_plan.jobs), force=force)
+        files = collect_project_files(config, auto_fetch=not dry_run)
         results, payload, code = run_regression(
             config=config,
             plan=new_plan,
@@ -2540,7 +2603,14 @@ def status_run(
         summary = _live_summary(plan, facts_map)
         done_exists = provider.transport.exists(f".solouvm/runs/{actual_run_id}/launch.done")
         alive = False if done_exists else _launch_pid_alive(provider, actual_run_id)
-        running_flag = alive or (not done_exists and int(summary["running"]) > 0)  # type: ignore[arg-type]
+        active_build = any(
+            provider.transport.exists(f".solouvm/build/{mode}/{key}.lock")
+            for mode, key in plan.builds.items()
+        )
+        running_flag = (  # type: ignore[arg-type]
+            controller_is_active(run_dir(root, actual_run_id))
+            or active_build or alive or (not done_exists and int(summary["running"]) > 0)
+        )
         return {
             "run_id": actual_run_id,
             "active": running_flag,
@@ -2862,6 +2932,12 @@ def clean_project(
 
     if run_id is not None:
         actual = resolve_run_id(root, run_id)
+        run_path = run_dir(root, actual)
+        if run_is_active(run_path) or (
+            (run_path / "plan.json").is_file()
+            and status_run(config=config, provider=provider, run_id=actual)["active"]
+        ):
+            raise RunActiveError(f"cannot clean active run {actual!r}", hint="stop the run first")
         rel = f".solouvm/runs/{actual}"
         _rm_path(provider, root, rel, local_only=local_only)
         removed.append(rel)
@@ -2870,7 +2946,27 @@ def clean_project(
             latest_link.unlink()
         return {"removed": removed, "mode": "run", "run_id": actual, "local_only": local_only}
 
-    pruned = prune_history(root, keep=config.history.keep)
+    def remote_run_active(run: str) -> bool:
+        path = run_dir(root, run) / "plan.json"
+        if not path.is_file():
+            return False
+        run_plan = read_plan(path)
+        run_provider = get_provider(config, run_plan.provider) if (
+            run_plan.provider and run_plan.provider != provider.name
+        ) else provider
+        if type(run_provider.transport) is LocalTransport:
+            return False
+        return bool(status_run(config=config, provider=run_provider, run_id=run)["active"])
+
+    def remote_build_active(label: str) -> bool:
+        return is_remote and provider.transport.exists(f".solouvm/build/{label}.lock")
+
+    pruned = prune_history(
+        root,
+        keep=config.history.keep,
+        remote_run_active=remote_run_active,
+        remote_build_active=remote_build_active,
+    )
     removed_runs = list(pruned.get("removed_runs", []))
     removed_builds = list(pruned.get("removed_builds", []))
     if is_remote:
@@ -2879,6 +2975,14 @@ def clean_project(
             *(f".solouvm/build/{b}" for b in removed_builds),
         ]
         for rel in remote_rels:
+            if rel.startswith(".solouvm/build/") and (
+                provider.transport.exists(f"{rel}.lock")
+            ):
+                continue
+            if rel.startswith(".solouvm/runs/") and _launch_pid_alive(
+                provider, rel.rsplit("/", 1)[-1]
+            ):
+                continue
             _rm_path(provider, root, rel, local_only=False)
     return {
         "removed": [*removed_runs, *removed_builds],

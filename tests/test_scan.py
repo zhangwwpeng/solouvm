@@ -1,10 +1,12 @@
 import io
+from datetime import date
 
 import pytest
 
 from solouvm.backends import get_backend
 from solouvm.judge.scan import scan
-from solouvm.model import Checks
+from solouvm.judge.waivers import apply_waivers
+from solouvm.model import Checks, Waiver
 
 SUMMARY = """\
 --- UVM Report Summary ---
@@ -17,6 +19,27 @@ UVM_FATAL :    0
 ** Report counts by id
 [AXI_SCB]     3
 """
+
+
+def test_streaming_waivers_keep_counts_and_first_unwaived_error():
+    checks = Checks(waivers=(Waiver(id="KNOWN", reason="expected diagnostic", severity=("ERROR",),
+                                    max=2),))
+    backend = get_backend("vcs")
+    today = date(2026, 11, 22)
+    lines = [
+        "UVM_ERROR @ 0: reporter [KNOWN] ignored",
+        "UVM_ERROR @ 0: reporter [KNOWN] ignored",
+        *["UVM_ERROR @ 0: reporter [KNOWN] unwaived"] * 1000,
+    ]
+    detailed = scan(lines, checks=checks, backend=backend)
+    compact = scan(lines, checks=checks, backend=backend, verdict_date=today)
+
+    expected = apply_waivers(checks.waivers, detailed, today=today)
+    actual = apply_waivers(checks.waivers, compact, today=today)
+    assert actual.counts == expected.counts
+    assert actual.used == expected.used
+    assert compact.uvm_lines == {}
+    assert compact.uvm_msgs == [(3, "ERROR", "KNOWN", lines[2])]
 
 
 def _scan(text, checks=None, backend="vcs"):

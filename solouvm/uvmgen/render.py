@@ -397,6 +397,17 @@ def render_tb_top(
     clk_rst_decl_lines: list[str] = []
     clk_rst_gen_lines: list[str] = []
     if_inst_lines: list[str] = []
+    clocks = {iface.clock for iface in seen_ifaces.values()}
+    resets: dict[str, str] = {}
+    for iface in seen_ifaces.values():
+        reset, polarity = iface.reset
+        if reset in clocks or (reset in resets and resets[reset] != polarity):
+            raise ConfigError(
+                f"incompatible shared clock/reset declaration for {reset!r}", code="CFG_INVALID"
+            )
+        resets[reset] = polarity
+    if (clocks | resets.keys()) & {f"u_{name}_if" for name in seen_ifaces}:
+        raise ConfigError("clock/reset collides with an interface instance", code="CFG_INVALID")
     seen_signals: set[str] = set()
     for iface in seen_ifaces.values():
         rst_name, rst_active = iface.reset

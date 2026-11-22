@@ -450,7 +450,7 @@ def test_0a_build_interrupted_and_partial_missing_are_incomplete():
         partial=True,
     )
     assert v_partial_run.status == "incomplete"
-    assert "build interrupted" in v_partial_run.reason
+    assert "build still running" in v_partial_run.reason
 
     v_partial_none = decide(
         facts=None,

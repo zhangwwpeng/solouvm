@@ -250,6 +250,15 @@ def _case_rng(seed_key: str, case_name: str) -> random.Random:
     return random.Random(int.from_bytes(digest[:8], "big"))
 
 
+def enforce_job_limit(config: Config, count: int, *, force: bool) -> None:
+    if not force and count > config.limits.max_jobs:
+        raise ConfigError(
+            f"{count} jobs exceed limits.max_jobs ({config.limits.max_jobs})",
+            code="LIMIT_EXCEEDED",
+            hint="pass --force or narrow selection",
+        )
+
+
 def build_plan(
     *,
     cases: list[Case],
@@ -339,11 +348,9 @@ def build_plan(
                 f"defined builds: {known}",
                 code="CASE_INVALID",
             )
-        seed_spec = (
-            selected.seeds
-            if selected.seeds is not None
-            else (cli_seeds if cli_seeds is not None else config.regress.seeds)
-        )
+        seed_spec = cli_seeds
+        if seed_spec is None:
+            seed_spec = selected.seeds if selected.seeds is not None else config.regress.seeds
         if (
             shard_spec is not None
             and not explicit_rng_seed
@@ -426,12 +433,7 @@ def build_plan(
             had_picked=bool(picked),
         )
 
-    if not force and len(jobs) > config.limits.max_jobs:
-        raise ConfigError(
-            f"{len(jobs)} jobs exceed limits.max_jobs ({config.limits.max_jobs})",
-            code="LIMIT_EXCEEDED",
-            hint="pass --force or narrow selection",
-        )
+    enforce_job_limit(config, len(jobs), force=force)
 
     plan_builds = {
         mode: (builds or {}).get(mode, mode) for mode in dict.fromkeys(j.build for j in jobs)

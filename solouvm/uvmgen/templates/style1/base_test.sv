@@ -34,7 +34,7 @@ class ${env}_base_test extends uvm_test;
   endfunction : start_of_simulation_phase
 
   virtual task run_phase(uvm_phase phase);
-    phase.phase_done.set_drain_time(this, 1us);
+    phase.get_objection().set_drain_time(this, 1us);
     phase.raise_objection(this);
     // solouvm:user begin run_phase
     // solouvm:user end run_phase

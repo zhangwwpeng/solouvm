@@ -9,7 +9,7 @@
 - `--limit N`: row/line limit (default `50`, `0` disables truncation); for `triage packet`, sets character budget
 - `--role main|triage`: enforce role permissions (`ROLE_DENIED` -> exit `2`)
 - `--provider NAME`: override configured provider
-- `--no-hooks`: skip A-side hooks (reserved)
+- `--no-hooks`: skip A-side hooks
 - `--version`: print version and exit
 
 ## Role Matrix
@@ -25,7 +25,7 @@
 
 - **Setup & Inspect**:
   - `init [--simulator fake|vcs|xrun|questa|xezim|verilator] [--bare] [--agents claude]`
-  - `config [KEY]`, `files`, `validate`, `schema [job.facts|plan|results|tasks|json_envelope]`, `doctor`, `help [TOPIC]`
+  - `config [KEY]`, `files`, `validate`, `schema [facts|output|packet|plan|results]`, `doctor`, `help [TOPIC]`
 - **UVM Scaffolding**:
   - `new agent|env|test|seq|vseq NAME [--env E] [--agent A] [--agents A,B]`
   - `uvm sync [--env E] [--agent A] [--dry-run]`, `uvm diff [--env E] [--agent A]`, `lint-style`

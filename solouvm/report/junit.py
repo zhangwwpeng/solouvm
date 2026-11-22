@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -11,6 +12,7 @@ __all__ = ["render_junit", "write_junit_xml"]
 
 _FAILURE_STATUSES = frozenset({"fail", "xpass", "false_pass"})
 _ERROR_STATUSES = frozenset({"timeout", "killed", "incomplete", "error"})
+_INVALID_XML = re.compile(r"[^\x09\x0a\x0d\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
 
 
 def render_junit(payload: dict[str, object], *, project: str = "solouvm") -> str:
@@ -68,6 +70,11 @@ def render_junit(payload: dict[str, object], *, project: str = "solouvm") -> str
         elif status == "xfail":
             ET.SubElement(tc, "system-out").text = f"xfail: {reason}"
 
+    for element in suite.iter():
+        for name, value in element.attrib.items():
+            element.set(name, _INVALID_XML.sub("\ufffd", value))
+        if element.text is not None:
+            element.text = _INVALID_XML.sub("\ufffd", element.text)
     ET.indent(suite, space="  ")
     return ET.tostring(suite, encoding="unicode", xml_declaration=True) + "\n"
 

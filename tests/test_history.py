@@ -450,3 +450,15 @@ def test_prune_history_keeps_active_and_referenced_builds(tmp_path: Path) -> Non
     assert (root / ".solouvm" / "build" / "default" / "k_active").exists()
     # latest symlink updated because R1 was removed
     assert resolve_run_id(root, "latest") == "R3"
+
+
+def test_prune_keeps_run_while_compiling_before_first_job(tmp_path: Path) -> None:
+    now = datetime.now(timezone.utc)
+    _write_plan_file(tmp_path, "compiling", now, builds={"default": "k_build"})
+    lock = tmp_path / ".solouvm" / "build" / "default" / "k_build.lock"
+    lock.mkdir(parents=True)
+
+    assert prune_history(tmp_path, keep=0, dry_run=True)["kept_runs"] == ["compiling"]
+    assert prune_history(tmp_path, keep=0)["removed_runs"] == []
+    lock.rmdir()
+    assert prune_history(tmp_path, keep=0)["removed_runs"] == ["compiling"]

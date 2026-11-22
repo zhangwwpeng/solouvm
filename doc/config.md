@@ -2,7 +2,7 @@
 
 本文是 solouvm 全部用户配置的完整参考：项目配置 `solouvm.conf.py`、个人覆盖 `solouvm.local.py`、文件清单 `filelist.py`、case 定义 `case.py`。需求编号见 [requirements.md](requirements.md)。
 
-> 状态：设计稿，尚无代码。键名与默认值在实现前可能调整，调整时同步本文。
+> 本文描述配置键、类型及默认值。
 
 ## 1. 文件与查找
 
@@ -225,13 +225,17 @@ case 可以用 `Case(checks={...})` 覆盖其中任意键（T-05）；`waivers` 
 一个命名 provider 是 transport、launcher、sync 的组合，外加环境准备（见 [architecture.md](architecture.md) §6）。
 
 ```python
-"providers": {
-    "farm": {
-        "transport": {"kind": "local"},                       # 默认 local
-        "launcher":  {"kind": "lsf", "queue": "normal",
-                      "resources": "rusage[mem=8000]", "extra": []},
-        "sync":      {"kind": "none"},                        # 默认 none
-        "setup":     "module load vcs/2025.06",
+CFG = {
+    "simulator": "vcs",
+    "top": "tb_top",
+    "provider": "farm",
+    "providers": {
+        "farm": {
+            "transport": {"kind": "local"},
+            "launcher": {"kind": "lsf", "queue": "normal", "resources": "rusage[mem=8000]"},
+            "sync": {"kind": "none"},
+            "setup": "module load vcs/2025.06",
+        },
     },
 }
 ```

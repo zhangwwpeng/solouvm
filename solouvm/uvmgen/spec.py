@@ -134,7 +134,12 @@ class Interface:
         object.__setattr__(self, "reset", (rst_name, rst_active))
 
         signals = _to_tuple(owner, "signals", self.signals, Signal, "Signal")
-        seen_sigs: set[str] = set()
+        if self.clock == rst_name:
+            raise _spec_error(f"{owner}: clock and reset must have different names")
+        generated = {"drv_cb", "mon_cb", "drv_mp", "mon_mp", "slv_drv_cb", "slv_drv_mp"}
+        if {self.clock, rst_name} & generated:
+            raise _spec_error(f"{owner}: clock/reset collides with a generated name")
+        seen_sigs = generated | {self.clock, rst_name}
         for sig in signals:
             if sig.name in seen_sigs:
                 raise _spec_error(f"{owner}: duplicate signal name {sig.name!r}")
@@ -260,7 +265,13 @@ class Env:
         owner = f"Env {self.name!r}"
         agents = _to_tuple(owner, "agents", self.agents, Agent, "Agent")
         by_name: dict[str, Agent] = {}
+        reserved = {"cfg", "vsqr", "has_scoreboard", "build_sub_cfgs"}
+        reserved.update(name for name, enabled in (
+            ("scb", self.scoreboard), ("ref_model", self.ref_model), ("cov", self.coverage),
+        ) if enabled)
         for ag in agents:
+            if ag.name in reserved:
+                raise _spec_error(f"{owner}: agent name {ag.name!r} is reserved")
             if ag.name in by_name:
                 raise _spec_error(f"{owner}: duplicate agent name {ag.name!r}")
             by_name[ag.name] = ag

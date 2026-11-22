@@ -166,11 +166,16 @@ def create_component(
         svh = update_pkg_files(root_path, f"{env_name}_test")
         written.append(svh)
         target = _resolve_case_target(root_path, case_dirs, case_path)
+        env = spec.get_env(env_name) if spec is not None else None
+        env_dir = root_path / "verif" / "envs" / env_name
+        has_scoreboard = env.scoreboard if env is not None else (
+            env_dir / f"{env_name}_scb.sv"
+        ).is_file()
         new_case = Case(
             name=name,
             uvm_test=f"{env_name}_{name}_test",
             stage="wip",
-            expect=[Expect(scoreboard=f"{env_name.upper()}_SCB", min=1)],
+            expect=[Expect(scoreboard=f"{env_name.upper()}_SCB", min=1)] if has_scoreboard else [],
         )
         with record_lock(root_path):
             add_case(target, new_case)

@@ -2,7 +2,7 @@
 
 本文列出 solouvm 全部命令、参数与退出码。人和 AI 使用同一套命令（N-16）：默认输出给人看，`--json` 给程序与 AI。命令行输出、错误信息一律为英文（N-15）；本文的说明用中文。
 
-> 状态：设计稿，尚无代码。命令标题中的（M2）等表示所属里程碑，未标注的属于 M1；里程碑划分见 requirements.md §25。
+> 命令标题中的（M2）等表示所属里程碑，未标注的属于 M1。里程碑划分见 requirements.md §25。
 
 ## 1. 约定
 
@@ -45,13 +45,15 @@ solouvm [全局参数] <命令> [命令参数]
 | `--tag TAG` | 只选带此 tag 的 case，可重复；多个 tag 之间为"或" |
 | `--exclude-tag TAG` | 排除带此 tag 的 case，可重复，优先于 `--tag` |
 | `--stage LIST` | 按开发阶段选，如 `ready,signoff`；默认 `wip,ready,signoff`（T-19、M-18） |
-| `--seed N` / `--seeds SPEC` | 覆盖种子；`SPEC` 如 `"1-5,42"` 或 `"random:10"` |
+| `--seed N` / `--seeds SPEC` | 覆盖 case 和全局配置的种子。`SPEC` 如 `"1-5,42"` 或 `"random:10"` |
 | `--build MODE` | 只选使用该编译配置的 case |
 | `--shard I/N` | 稳定地把 job 分成 N 份，只取第 I 份（1 起计）（T-16，M2） |
 | `--shard-seed KEY` | 分片展开 `random:N` 时的共享随机序列标识（未传时回退 `SOLOUVM_SHARD_SEED` 环境变量或 `run_id`） |
 | `--allow-empty` | 选择结果为空时返回 0 而不是 2（T-17） |
 
 选择顺序：先按 `--stage` 过滤，再按 `--case`、`--tag`、`--exclude-tag`、`--build`，然后展开种子成 job，最后分片。`--case` 选中 `planned` 的 case 时报错，选中 `deprecated` 的 case 时照跑并警告（config.md §5.1）。
+
+`--order duration` 按各 case 最近一轮完整结果中的最大 job 耗时降序排列。没有历史数据的 case 排在末尾，同耗时按名称和种子排序。
 
 ### 1.4 机器可读输出
 
@@ -98,7 +100,7 @@ solouvm [全局参数] <命令> [命令参数]
 |------|------|
 | `-j, --jobs N` | 并行数 |
 | `--force` | 允许 job 数超过 `limits.max_jobs`（防止误起大量仿真） |
-| `--detach` | 启动后立即返回（Z-06） |
+| `--detach` | 提交后台任务后返回（Z-06）。失败数上限、自动重试和失败后自动补波形需要前台执行 |
 | `--wave` | 所有 job 打开波形 |
 | `--retry N` | 覆盖 `regress.retry` |
 | `--max-fail N` | 失败数达到 N 后停止派发（X-12） |
@@ -557,7 +559,7 @@ EOF
 | 参数 | 说明 |
 |------|------|
 | `--repo URL` | Git 仓库地址（默认：`https://github.com/zhangwwpeng/solouvm`） |
-| `--ref REF` | 指定分支、标签或提交号 |
+| `--ref REF` | 指定分支、标签或完整的 Git 提交哈希 |
 | `--user` / `--system` | 指定更新为用户级（`~/.local`）或系统级（`/usr/local`）；不传时优先沿用 `.install-meta` 记录 |
 | `--prefix DIR` | 安装或更新到自定义前缀目录 |
 | `--python PATH` | 指定目标 Python >= 3.10 解释器路径 |

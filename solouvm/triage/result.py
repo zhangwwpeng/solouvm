@@ -22,6 +22,7 @@ from solouvm.model import (
 )
 from solouvm.notes.commands import parse_record_ref, read_stdin_text
 from solouvm.records import append_record, record_lock, replace_record
+from solouvm.records.write import _read, _write_atomic
 from solouvm.report.json import read_results_json
 from solouvm.roles import check_role
 from solouvm.triage.plan import (
@@ -52,6 +53,11 @@ ALLOWED_VERDICTS: dict[str, frozenset[str]] = {
 }
 
 _FENCE_RE = re.compile(r"^\s*```")
+
+
+def _require_unchanged(path: Path, expected: bytes | None) -> None:
+    if _read(path) != expected:
+        raise RecordError(f"{path} changed before write", code="RECORD_CONFLICT")
 
 
 def _validate_doc_text(doc_text: str) -> str:
@@ -296,8 +302,6 @@ def write_result(
         at=now_iso,
         doc_body=clean_doc,
     )
-    atomic_write_text_safe(doc_abs, rendered_doc)
-
     triage_record = Triage(
         task=task_id,
         verdict=verdict,
@@ -312,26 +316,6 @@ def write_result(
         at=now_iso,
     )
 
-    for case_name in task_cases:
-        with record_lock(root):
-            fresh_sources = collect_cases_with_sources(config)
-            target_cs = next((cs for cs in fresh_sources if cs.case.name == case_name), None)
-            if target_cs is None:
-                raise RecordError(f"case {case_name!r} not found", code="RECORD_INVALID")
-            existing = next(
-                (r for r in target_cs.case.notes if isinstance(r, Triage) and r.task == task_id),
-                None,
-            )
-            if existing is not None:
-                if existing.review is not None:
-                    raise ConfigError(
-                        "task already reviewed; ask main to reject before rewriting",
-                        code="TRIAGE_INVALID",
-                    )
-                replace_record(target_cs.file, case_name, triage_record)
-            else:
-                append_record(target_cs.file, case_name, triage_record)
-
     result_obj: dict[str, object] = {
         "verdict": verdict,
         "confidence": confidence,
@@ -343,7 +327,7 @@ def write_result(
         "at": now_iso,
     }
 
-    with tasks_lock(root, actual_run):
+    with tasks_lock(root, actual_run), record_lock(root):
         latest_data = read_tasks_json(tpath)
         tasks_list = [dict(t) for t in latest_data["tasks"] if isinstance(t, dict)]
         target_task = next((t for t in tasks_list if t.get("id") == task_id), None)
@@ -365,5 +349,44 @@ def write_result(
             "policy": latest_data.get("policy", {}),
             "tasks": tasks_list,
         }
-        atomic_write_json(tpath, payload)
+        sources = {source.case.name: source for source in collect_cases_with_sources(config)}
+        edits = []
+        for case_name in task_cases:
+            source = sources.get(case_name)
+            if source is None:
+                raise RecordError(f"case {case_name!r} not found", code="RECORD_INVALID")
+            existing = next(
+                (r for r in source.case.notes if isinstance(r, Triage) and r.task == task_id),
+                None,
+            )
+            if existing is not None and existing.review is not None:
+                raise ConfigError(
+                    "task already reviewed; ask main to reject before rewriting",
+                    code="TRIAGE_INVALID",
+                )
+            edits.append((source.file, case_name, existing is not None))
+
+        originals = {path: _read(path) for path, _, _ in edits}
+        originals[doc_abs] = _read(doc_abs)
+        written: dict[Path, bytes | None] = {}
+        try:
+            for path, case_name, replace in edits:
+                _require_unchanged(path, written.get(path, originals[path]))
+                edit_record = replace_record if replace else append_record
+                edit_record(path, case_name, triage_record)
+                written[path] = _read(path)
+            _require_unchanged(doc_abs, originals[doc_abs])
+            atomic_write_text_safe(doc_abs, rendered_doc)
+            written[doc_abs] = rendered_doc.encode()
+            atomic_write_json(tpath, payload)
+        except Exception:
+            for path, written_bytes in reversed(list(written.items())):
+                if _read(path) != written_bytes:
+                    continue
+                original = originals[path]
+                if original is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    _write_atomic(path, original)
+            raise
         return target_task

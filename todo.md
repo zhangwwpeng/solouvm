@@ -28,7 +28,7 @@
 
 ## 代码
 
-- [x] M1 核心闭环（本机）——已完成 [learn/README.md](learn/README.md) 任务 1–25（含 `fake` 端到端全流程与 CLI 分发）
+- [x] M1 核心闭环（本机），含 `fake` 端到端流程与 CLI 分发。见[需求与里程碑](doc/requirements.md#25-里程碑归属)。
 - [x] M2 远程与重跑（`ssh`/`lsf`、`rsync`/`git`、`rerun`/`status`/`stop`、`bug`/`note`/`todo`、`history`/`report --compare`/HTML）
 - [x] M3 fast compile（`solouvm check`：slang、`fake_top`、`incremental` 与 `lint-style`、`uvm sync/diff`）
 - [x] M4 周边（`cov merge/report`、`wave`、`progress`、`doc`、`doctor`、`validate`、`help`、弱信号）

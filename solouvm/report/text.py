@@ -18,7 +18,11 @@ def _last_log(job: dict[str, object]) -> str | None:
     if not isinstance(attempts, list) or not attempts:
         return None
     non_wave = [a for a in attempts if isinstance(a, dict) and not a.get("wave")]
-    target = non_wave[-1] if non_wave else attempts[-1]
+    chosen = job.get("chosen_try")
+    target = next(
+        (attempt for attempt in non_wave if attempt.get("try") == chosen),
+        non_wave[-1] if non_wave else attempts[-1],
+    )
     if isinstance(target, dict) and isinstance(target.get("log"), str):
         return target["log"]
     return None

@@ -144,7 +144,7 @@ def _expand_export(name: str, value: object, path: Path) -> list[Case]:
     return out
 
 
-def _extract_cases(namespace: dict[str, object], path: Path) -> list[Case]:
+def extract_cases(namespace: dict[str, object], path: Path) -> list[Case]:
     found_any = False
     cases: list[Case] = []
 
@@ -207,7 +207,7 @@ def _load_file(path: Path, root: Path) -> list[CaseSource]:
         sys.path.insert(0, entry)
     try:
         namespace = runpy.run_path(str(path), run_name="__solouvm_case__")
-        cases = _extract_cases(namespace, path)
+        cases = extract_cases(namespace, path)
     except ConfigError as exc:
         if exc.file is None:
             exc.file = str(path)

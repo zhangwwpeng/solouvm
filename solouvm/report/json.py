@@ -94,6 +94,7 @@ def result_to_dict(result: Result) -> dict[str, object]:
         "flaky": bool(result.flaky),
         "attempts": [dict(a) for a in result.attempts],
         "repro": dict(result.repro),
+        "chosen_try": result.chosen_try,
     }
 
 
@@ -297,6 +298,11 @@ def validate_results_payload(payload: object, *, path: Path | None = None) -> di
                     "invalid results payload: job.attempts must be a list of objects",
                     path,
                 )
+        chosen = job.get("chosen_try")
+        if chosen is not None and (
+            not isinstance(chosen, int) or isinstance(chosen, bool) or chosen <= 0
+        ):
+            raise _invalid_results("invalid results payload: job.chosen_try must be positive", path)
 
     if "signatures" in payload and payload["signatures"] is not None:
         sigs = payload["signatures"]

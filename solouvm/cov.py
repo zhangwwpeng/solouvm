@@ -283,7 +283,9 @@ def _collect_passed_dbs(
             continue
         job = plan_jobs.get(job_id)
         job_dir = job.dir if job is not None else f".solouvm/runs/{plan.run_id}/{job_id}"
-        last_try = _last_numeric_try_from_entry(item)
+        last_try = _parse_numeric_try(item.get("chosen_try"))
+        if last_try is None:
+            last_try = _last_numeric_try_from_entry(item)
         if last_try is not None:
             db = _find_db_in_try(provider, f"{job_dir}/try{last_try}", candidates)
         else:

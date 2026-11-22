@@ -2,7 +2,7 @@
 
 `solouvm check` 的目标：改完代码后，在几秒到几十秒内知道"能不能编过"，而不必等一次几分钟到几十分钟的完整编译与 elab（E 区需求）。
 
-> 状态：设计稿，尚无代码。标注"待验证"的地方需要在真实工程和工具版本上确认。
+> 标注“待验证”的地方需要在真实工程和工具版本上确认。
 
 ## 1. 三层检查
 
@@ -46,7 +46,9 @@ slang 解析不了的内容必须能排除（E-03）：
 | 厂商私有系统任务（如 `$fsdbDumpvars`） | slang 默认会报未知系统任务，用对应的警告开关降级或关闭 |
 | 厂商私有语法扩展 | 只能排除该文件；交给第二层的真实仿真器检查 |
 
-具体开关名放进 `check.slang_args` 的默认值，实现时随 slang 版本核对。
+通过 `check.slang_args` 追加 Slang 选项。`init` 生成的项目会设置 `["--timescale", "1ns/1ps"]`，为未声明时间单位的 UVM 库和设计单元提供默认值。使用 Slang 检查 UVM 工程时，将 `check.uvm_src` 指向含 `uvm_pkg.sv` 的 UVM 源码目录。
+
+用 Verilator 运行 `init` 生成的 AXI 样例时，将兼容的 UVM 库目录以 `+incdir+` 加入 `FILES["tb"]`，并把库的 `uvm_pkg.sv` 放在工程的 UVM package 之前。使用无 DPI 的 UVM 库时，在 `defines` 加上 `UVM_NO_DPI`，并在 `builds.default.compile_opts` 加上 `["--timescale", "1ns/1ps"]`。可通过 `solouvm run --case smoke --seed 1` 固定种子运行。样例向 RTL 发出一笔地址事务，scoreboard 检查 monitor 采到的地址与长度。
 
 ### 2.3 运行位置
 

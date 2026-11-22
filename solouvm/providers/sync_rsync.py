@@ -122,10 +122,11 @@ class RsyncSync:
     def push(self, transport: Transport, tree: str, files: Iterable[str]) -> None:
         """Push source tree (step 1) and explicit generated files (step 2) via ``rsync``."""
         tree_path = Path(tree)
+        manifest = _normalize_manifest(tree_path, files)
         src = f"{str(tree_path).rstrip('/')}/"
         dest, rsh_args = self._dest_and_rsh(transport)
 
-        tree_cmd = ["rsync", "-a", *rsh_args]
+        tree_cmd = ["rsync", "-a", "--checksum", *rsh_args]
         if self.delete:
             tree_cmd.append("--delete")
         tree_cmd.extend(["--exclude=.git/", "--exclude=.solouvm/"])
@@ -134,7 +135,6 @@ class RsyncSync:
         tree_cmd.extend([src, dest])
         self._run_rsync(tree_cmd)
 
-        manifest = _normalize_manifest(tree_path, files)
         if manifest:
-            files_cmd = ["rsync", "-a", *rsh_args, "--files-from=-", src, dest]
+            files_cmd = ["rsync", "-a", "--checksum", *rsh_args, "--files-from=-", src, dest]
             self._run_rsync(files_cmd, input_text="\n".join(manifest) + "\n")

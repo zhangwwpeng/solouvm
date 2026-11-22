@@ -134,7 +134,10 @@ def test_p0_3_clean_project_prune_uses_full_solouvm_relative_paths(tmp_path: Pat
         kind = "ssh"
 
         def exists(self, path: str) -> bool:
-            return True
+            return not path.endswith(".lock")
+
+        def read_many(self, pattern: str) -> dict[str, str]:
+            return {}
 
         def rm_tree(self, path: str) -> None:
             removed_remote.append(path)

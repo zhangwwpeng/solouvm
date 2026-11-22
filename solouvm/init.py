@@ -14,6 +14,7 @@ from solouvm.gen.makefile import render_root_makefile
 from solouvm.model import validate_records
 from solouvm.uvmgen.pkgfiles import find_svh_inconsistencies, update_pkg_files
 from solouvm.uvmgen.render import render_component
+from solouvm.uvmgen.sample import inject_sample
 from solouvm.uvmgen.spec import Agent, Env, Field, Interface, Signal, Tbspec, load_tbspec
 
 SUPPORTED_AGENTS_FRAMEWORKS = ("claude",)
@@ -86,6 +87,9 @@ def _render_conf(*, simulator: str, bare: bool) -> str:
             "checks": {{
                 "max_uvm_error": 0,
                 "max_uvm_fatal": 0,
+            }},
+            "check": {{
+                "slang_args": ["--timescale", "1ns/1ps"],
             }},
             "case_dirs": [],
             "filelist_dirs": [],
@@ -275,21 +279,6 @@ def _render_claude_triage_agent() -> str:
     )
 
 
-def _inject_dut_into_tb_top(tb_top_text: str) -> str:
-    marker = "  // solouvm:user begin dut\n"
-    dut_inst = (
-        "  axi_slv_dummy u_dut (\n"
-        "    .aclk    (aclk),\n"
-        "    .aresetn (aresetn),\n"
-        "    .awaddr  (u_axi_if.awaddr),\n"
-        "    .awlen   (u_axi_if.awlen),\n"
-        "    .awvalid (u_axi_if.awvalid),\n"
-        "    .awready (u_axi_if.awready)\n"
-        "  );\n"
-    )
-    return tb_top_text.replace(marker, marker + dut_inst, 1)
-
-
 def _update_gitignore(root: Path) -> bool:
     path = root / ".gitignore"
     if path.exists():
@@ -363,8 +352,7 @@ def init_project(
             targets.update(render_component("agent", ag.name, spec))
         targets.update(render_component("env", "axi", spec))
         targets.update(render_component("test", "smoke", spec, env_name="axi"))
-        tb_top_rel = Path("verif") / "tb" / "tb_top.sv"
-        targets[tb_top_rel] = _inject_dut_into_tb_top(targets[tb_top_rel])
+        targets = {rel: inject_sample(rel, content) for rel, content in targets.items()}
         if not (root_path / "Makefile").exists():
             targets[Path("Makefile")] = render_root_makefile()
 
