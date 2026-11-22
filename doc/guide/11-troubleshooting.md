@@ -28,4 +28,4 @@
 
 ## 3. 尚未经真实 EDA 工具验证清单
 
-在无商业工具许可证环境外使用 VCS / Xcelium / Questa / Verilator / Icarus / `slang` / Verdi / LSF 时，请先用内置 `solouvm doctor` 与单 case `solouvm run --case <name>` 实测，重点核对 [doc/requirements.md §26](../requirements.md#26-不确定事项) 中的 17 项实机变量（编译键 incdir 耗时、各版本 UVM 选项与结束打印 regex、参数化 interface 下的 `fake_top`、`slang` 参数与 `${VAR}` 展开等）。
+在无商业工具许可证环境外使用 VCS / Xcelium / Questa / Xezim / Verilator / `slang` / Verdi / LSF 时，请先用内置 `solouvm doctor` 与单 case `solouvm run --case <name>` 实测，重点核对 [doc/requirements.md §26](../requirements.md#26-不确定事项) 中的 17 项实机变量（编译键 incdir 耗时、各版本 UVM 选项与结束打印 regex、参数化 interface 下的 `fake_top`、`slang` 参数与 `${VAR}` 展开等）。

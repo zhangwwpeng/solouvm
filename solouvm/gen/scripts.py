@@ -470,12 +470,12 @@ else
 
     if [ "$timeout_active" -eq 1 ] && [ "$timeout_impl" != "builtin" ]; then
         set -m
-        "$timeout_bin" --kill-after=10s "$timeout_s" "${cmd[@]}" >>"$log_path" 2>&1 &
+        "$timeout_bin" --kill-after=10s "$timeout_s" "${cmd[@]}" </dev/null >>"$log_path" 2>&1 &
         child_pid=$!
         set +m
     else
         set -m
-        "${cmd[@]}" >>"$log_path" 2>&1 &
+        "${cmd[@]}" </dev/null >>"$log_path" 2>&1 &
         child_pid=$!
         set +m
     fi
@@ -662,11 +662,20 @@ fi
 
 host=$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown)
 pid_file="$run_dir/launch.pid"
+done_file="$run_dir/launch.done"
 log_file="$run_dir/launch.log"
+rm -f "$done_file"
 
 if [ "$detach" -eq 1 ]; then
     set -m
-    nohup "${cmd[@]}" </dev/null >"$log_file" 2>&1 &
+    nohup bash -c '
+        done_f="$1"
+        shift
+        "$@"
+        rc=$?
+        : > "$done_f" 2>/dev/null || true
+        exit "$rc"
+    ' _ "$done_file" "${cmd[@]}" </dev/null >"$log_file" 2>&1 &
     pgid=$!
     set +m
     printf '%s %s\n' "$host" "$pgid" > "$pid_file"
@@ -674,18 +683,26 @@ if [ "$detach" -eq 1 ]; then
         nohup bash -c '
             sleep "$1"
             pgid="$2"
-            if kill -0 -"$pgid" 2>/dev/null; then
-                kill -TERM -"$pgid" 2>/dev/null || true
-                grace=0
-                while [ "$grace" -lt 10 ] && kill -0 -"$pgid" 2>/dev/null; do
-                    sleep 0.5
-                    grace=$((grace + 1))
-                done
-                if kill -0 -"$pgid" 2>/dev/null; then
-                    kill -KILL -"$pgid" 2>/dev/null || true
+            rid="$3"
+            done_f="$4"
+            if [ ! -f "$done_f" ]; then
+                if command -v bkill >/dev/null 2>&1; then
+                    bkill -J "solouvm_${rid}_*" >/dev/null 2>&1 || true
                 fi
+                if kill -0 -"$pgid" 2>/dev/null; then
+                    kill -TERM -"$pgid" 2>/dev/null || true
+                    grace=0
+                    while [ "$grace" -lt 10 ] && kill -0 -"$pgid" 2>/dev/null; do
+                        sleep 0.5
+                        grace=$((grace + 1))
+                    done
+                    if kill -0 -"$pgid" 2>/dev/null; then
+                        kill -KILL -"$pgid" 2>/dev/null || true
+                    fi
+                fi
+                : > "$done_f" 2>/dev/null || true
             fi
-        ' _ "$budget_s" "$pgid" </dev/null >/dev/null 2>&1 &
+        ' _ "$budget_s" "$pgid" "$run_id" "$done_file" </dev/null >/dev/null 2>&1 &
     fi
     exit 0
 fi
@@ -697,12 +714,13 @@ on_signal() {
         kill -TERM -"$pgid" 2>/dev/null || true
         wait "$pgid" 2>/dev/null || true
     fi
+    : > "$done_file" 2>/dev/null || true
     exit 130
 }
 trap 'on_signal' TERM INT
 
 set -m
-"${cmd[@]}" >"$log_file" 2>&1 &
+"${cmd[@]}" </dev/null >"$log_file" 2>&1 &
 pgid=$!
 set +m
 
@@ -710,6 +728,7 @@ printf '%s %s\n' "$host" "$pgid" > "$pid_file"
 
 rc=0
 wait "$pgid" || rc=$?
+: > "$done_file" 2>/dev/null || true
 exit "$rc"
 """
 

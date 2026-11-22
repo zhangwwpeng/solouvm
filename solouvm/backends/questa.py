@@ -7,8 +7,8 @@ from solouvm.backends.base import Backend
 # 不确定：各版本的确切选项需逐一核对（S-10）
 QUESTA = Backend(
     name="questa",
-    build="vlib work && vlog -work work -sv -f {filelist} && vopt -work work {top} -o {simv}",
-    run="vsim -c -lib {build_dir}/work {simv} -do 'run -all; quit -f'",
+    build="vlib work && vlog -work work -sv -f {filelist} && vopt -work work {top} -o {simv_name}",
+    run="vsim -c -lib {build_dir}/work {simv_name} -do 'run -all; quit -f'",
     simv="solouvm_opt",
     seed="-sv_seed {seed}",
     wave="-wlf {job_dir}/wave.wlf -do 'log -r /*; run -all; quit -f'",

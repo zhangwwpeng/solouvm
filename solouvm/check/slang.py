@@ -19,6 +19,7 @@ from solouvm.collect.files import GROUPS
 from solouvm.config.load import expand_env
 from solouvm.errors import ConfigError, InfraError
 from solouvm.gen.shell import check_no_newlines, relpath, sh_quote
+from solouvm.packages import package_sync_files
 from solouvm.providers.base import log_command
 from solouvm.providers.transport_local import LocalTransport
 
@@ -158,10 +159,13 @@ def format_check_path(
         return relpath(root_rel, base_rel)
     if outside is True:
         return value
-    root_rel, is_outside = resolve_in_root(root, resolved_root, value)
-    if is_outside:
-        return value
-    return relpath(root_rel, base_rel)
+    if os.path.isabs(value):
+        root_rel, is_outside = resolve_in_root(root, resolved_root, value)
+        if is_outside:
+            return value
+        return relpath(root_rel, base_rel)
+    norm_rel = posixpath.normpath(value.replace("\\", "/"))
+    return relpath(norm_rel, base_rel)
 
 
 def normalize_diag_path(raw_file: str, root: Path) -> str:
@@ -194,7 +198,13 @@ def normalize_diag_path(raw_file: str, root: Path) -> str:
         try:
             return from_check.resolve().relative_to(resolved_root).as_posix()
         except ValueError:
-            return posixpath.normpath(text)
+            rel_raw = os.path.relpath(str(from_check), str(norm_root))
+            try:
+                rel_res = os.path.relpath(str(from_check.resolve()), str(resolved_root))
+            except OSError:
+                rel_res = rel_raw
+            best = min((rel_raw, rel_res), key=lambda r: (len(Path(r).parts), len(r)))
+            return posixpath.normpath(best.replace("\\", "/"))
 
     if (check_dir / text).is_file() and not (norm_root / text).is_file():
         return posixpath.normpath(f"{CHECK_REL_DIR}/{text}")
@@ -223,14 +233,20 @@ def _find_local_binary(binary: str, root: Path) -> str | None:
     return None
 
 
-def _outside_exists_locally(entry: FileEntry) -> bool:
+def _resolve_outside_candidate(raw: str, root: Path) -> Path:
+    if os.path.isabs(raw):
+        return Path(raw)
+    return Path(os.path.normpath(root / raw))
+
+
+def _outside_exists_locally(entry: FileEntry, root: Path) -> bool:
     if "$" in entry.path:
         try:
             expanded = expand_env(entry.path)
         except ConfigError:
             return False
-        return Path(expanded).is_file()
-    return Path(entry.path).is_file()
+        return _resolve_outside_candidate(expanded, root).is_file()
+    return _resolve_outside_candidate(entry.path, root).is_file()
 
 
 def _expand_if_needed(value: str) -> str:
@@ -297,7 +313,7 @@ def resolve_check_where(
                 code="CHECK_UNAVAILABLE",
                 hint="install slang on PATH, set check.slang, or configure a remote provider",
             )
-        missing_outside = [e.path for e in outside_entries if not _outside_exists_locally(e)]
+        missing_outside = [e.path for e in outside_entries if not _outside_exists_locally(e, root)]
         if missing_outside:
             raise InfraError(
                 f"outside-root files missing on local host ({missing_outside[0]}) and "
@@ -543,6 +559,8 @@ def _parse_json_diag_item(item: object, root: Path) -> CheckDiagnostic | None:
     message = str(item.get("message") or item.get("msg") or item.get("text") or "").strip()
     hint_val = item.get("hint")
     hint = str(hint_val) if isinstance(hint_val, str) and hint_val.strip() else None
+    if hint is None and severity == "error" and _needs_uvm_hint(message):
+        hint = _UVM_SRC_HINT
     return CheckDiagnostic(
         file=normalize_diag_path(raw_file, root),
         line=line,
@@ -550,6 +568,16 @@ def _parse_json_diag_item(item: object, root: Path) -> CheckDiagnostic | None:
         severity=severity,
         message=message,
         hint=hint,
+    )
+
+
+_UVM_SRC_HINT = "set UVM_HOME or configure check.uvm_src to point to your UVM source directory"
+
+
+def _needs_uvm_hint(message: str) -> bool:
+    low = message.lower()
+    return "unknown package 'uvm_pkg'" in low or (
+        "uvm_macros.svh" in low and ("not found" in low or "no such file" in low)
     )
 
 
@@ -563,15 +591,25 @@ def _try_parse_json_diagnostics(text: str, root: Path) -> list[CheckDiagnostic] 
     except json.JSONDecodeError:
         # Support JSON-lines diagnostic streams if emitted line by line.
         lines = [ln.strip() for ln in stripped.splitlines() if ln.strip()]
-        if not lines or not all(ln.startswith("{") for ln in lines):
-            return None
-        items: list[object] = []
-        for ln in lines:
+        if len(lines) >= 2 and all(ln.startswith("{") and ln.endswith("}") for ln in lines):
+            items: list[object] = []
+            all_ok = True
+            for ln in lines:
+                try:
+                    items.append(json.loads(ln))
+                except json.JSONDecodeError:
+                    all_ok = False
+                    break
+            if all_ok:
+                parsed = items
+        if parsed is None and stripped.startswith(("[", "{")):
+            # Slang >= 12 appends "Build succeeded/failed: ..." summary after the JSON array.
             try:
-                items.append(json.loads(ln))
+                parsed, _ = json.JSONDecoder().raw_decode(stripped)
             except json.JSONDecodeError:
                 return None
-        parsed = items
+        if parsed is None:
+            return None
 
     if isinstance(parsed, dict):
         if isinstance(parsed.get("diagnostics"), list):
@@ -607,13 +645,15 @@ def parse_text_diagnostics(text: str, root: Path) -> list[CheckDiagnostic]:
         if severity is None or severity == "note":
             continue
         col_str = match.group("col")
+        msg_str = match.group("message").strip()
         diags.append(
             CheckDiagnostic(
                 file=normalize_diag_path(match.group("file"), root),
                 line=int(match.group("line")),
                 col=int(col_str) if col_str is not None else 0,
                 severity=severity,
-                message=match.group("message").strip(),
+                message=msg_str,
+                hint=_UVM_SRC_HINT if severity == "error" and _needs_uvm_hint(msg_str) else None,
             )
         )
     return diags
@@ -761,7 +801,8 @@ def run_slang(
             ) from exc
         rc, stdout, stderr = proc.returncode, proc.stdout, proc.stderr
     else:
-        provider.sync.push(provider.transport, str(root), [f"{CHECK_REL_DIR}/check.f"])
+        push_list = sorted({f"{CHECK_REL_DIR}/check.f", *package_sync_files(root, config)})
+        provider.sync.push(provider.transport, str(root), push_list)
         rc, stdout, stderr = _exec_slang_remote(provider=provider, argv=argv)
     duration_s = time.monotonic() - start
 

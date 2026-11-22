@@ -15,7 +15,8 @@ from difflib import get_close_matches
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from solouvm.backends import get_backend
+from solouvm.backends import resolve_sim_backend
+from solouvm.buildkey import strip_sv_comments
 from solouvm.collect.cases import (
     CaseSource,
     _case_files,
@@ -25,14 +26,18 @@ from solouvm.collect.files import (
     GROUPS,
     PACKAGE_GROUPS,
     FileList,
-    _Collector,
-    load_filelist_meta,
+    load_project_filelists,
 )
 from solouvm.config.load import expand_env, load_config
 from solouvm.errors import ERROR_CODES, ConfigError, SolouvmError
 from solouvm.gen.shell import sh_quote
 from solouvm.model import validate_records
-from solouvm.packages import ResolvedPackage, check_host_depends, resolve_packages
+from solouvm.packages import (
+    ResolvedPackage,
+    check_host_depends,
+    collect_from_resolved,
+    resolve_packages,
+)
 from solouvm.uvmgen.pkgfiles import find_svh_inconsistencies
 
 if TYPE_CHECKING:
@@ -56,8 +61,6 @@ __all__ = [
 ]
 
 _BASH_DEFAULT_ENV_RE = re.compile(r"\$\{\w+:-[^}]*\}")
-_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
-_LINE_COMMENT_RE = re.compile(r"//[^\n]*")
 _SV_DECL_RE = re.compile(
     r"^\s*(?:module|package)\s+(?:automatic\s+|static\s+)?([A-Za-z_][A-Za-z0-9_$]*)\b",
     re.MULTILINE,
@@ -260,7 +263,7 @@ def _check_duplicate_sv_modules(
         if not candidate.is_file():
             continue
         text = candidate.read_text(encoding="utf-8", errors="replace")
-        stripped = _LINE_COMMENT_RE.sub("", _BLOCK_COMMENT_RE.sub("", text))
+        stripped = strip_sv_comments(text, blank_strings=True)
         for match in _SV_DECL_RE.finditer(stripped):
             name = match.group(1)
             if rel_path not in defs[name]:
@@ -403,7 +406,7 @@ def validate_project(
             )
 
     try:
-        host_fl = load_filelist_meta(root)
+        project_fls = load_project_filelists(root, config.filelist_dirs)
     except SolouvmError as exc:
         issues.append(
             ValidationIssue(
@@ -416,20 +419,6 @@ def validate_project(
             )
         )
     else:
-        if not pkg_error:
-            try:
-                check_host_depends(host_fl, {pkg.name for pkg in pkgs})
-            except SolouvmError as exc:
-                issues.append(
-                    ValidationIssue(
-                        file=_rel_display(root, exc.file) or "filelist.py",
-                        line=exc.line,
-                        severity="error",
-                        message=exc.message,
-                        code=exc.code,
-                        hint=exc.hint,
-                    )
-                )
         for pkg in pkgs:
             _check_dotf_defaults(
                 root,
@@ -439,26 +428,32 @@ def validate_project(
                 file_label=_rel_display(root, pkg.filelist.path) or str(pkg.filelist.path),
                 allowed_groups=PACKAGE_GROUPS,
             )
-        _check_dotf_defaults(root, host_fl.spec, issues)
+        for pfl in project_fls:
+            fl_label = "filelist.py" if pfl.rel_dir == "." else f"{pfl.rel_dir}/filelist.py"
+            if not pkg_error:
+                try:
+                    check_host_depends(pfl.meta, {pkg.name for pkg in pkgs})
+                except SolouvmError as exc:
+                    issues.append(
+                        ValidationIssue(
+                            file=_rel_display(root, exc.file) or fl_label,
+                            line=exc.line,
+                            severity="error",
+                            message=exc.message,
+                            code=exc.code,
+                            hint=exc.hint,
+                        )
+                    )
+            _check_dotf_defaults(
+                root,
+                pfl.meta.spec,
+                issues,
+                base_dir=pfl.root_dir,
+                file_label=fl_label,
+            )
         if not pkg_error:
             try:
-                collector = _Collector(root)
-                for pkg in pkgs:
-                    collector.add_spec(
-                        pkg.filelist.spec,
-                        base_dir=pkg.root_dir,
-                        source_prefix=f"pkg:{pkg.name}:",
-                        allowed_groups=PACKAGE_GROUPS,
-                        use_base_for_dash_f=True,
-                    )
-                collector.add_spec(
-                    host_fl.spec,
-                    base_dir=collector.root,
-                    source_prefix="",
-                    allowed_groups=GROUPS,
-                    use_base_for_dash_f=False,
-                )
-                file_list = collector.finalize()
+                file_list = collect_from_resolved(root, pkgs, project_fls)
             except SolouvmError as exc:
                 issues.append(
                     ValidationIssue(
@@ -698,6 +693,7 @@ SCHEMAS: dict[str, dict[str, object]] = {
             "provider": {"type": "string"},
             "check": {"type": "object"},
             "case_dirs": {"type": "array", "items": {"type": "string"}},
+            "filelist_dirs": {"type": "array", "items": {"type": "string"}},
             "system_doc": {"type": "array", "items": {"type": "string"}},
             "triage": {"type": "object"},
             "doc": {"type": "object"},
@@ -756,7 +752,12 @@ SCHEMAS: dict[str, dict[str, object]] = {
                     "verified": {"type": ["string", "null"], "format": "date"},
                     "seed": {"type": ["integer", "null"]},
                     "signature": {"type": ["string", "null"]},
+                    "run": {"type": ["string", "null"]},
+                    "job": {"type": ["string", "null"]},
+                    "reporter": {"type": ["string", "null"]},
+                    "owner": {"type": ["string", "null"]},
                     "link": {"type": ["string", "null"]},
+                    "body": {"type": "string"},
                     "author": {"type": ["string", "null"]},
                     "at": {"type": ["string", "null"]},
                 },
@@ -771,19 +772,31 @@ SCHEMAS: dict[str, dict[str, object]] = {
                     "owner": {"type": ["string", "null"]},
                     "due": {"type": ["string", "null"], "format": "date"},
                     "done": {"type": "boolean"},
+                    "author": {"type": ["string", "null"]},
+                    "at": {"type": ["string", "null"]},
                 },
             },
             {
                 "title": "Log",
                 "type": "object",
                 "required": ["date", "text"],
-                "properties": {"date": {"type": "string"}, "text": {"type": "string"}},
+                "properties": {
+                    "date": {"type": "string", "format": "date"},
+                    "text": {"type": "string"},
+                    "author": {"type": ["string", "null"]},
+                    "at": {"type": ["string", "null"]},
+                },
             },
             {
                 "title": "Note",
                 "type": "object",
                 "required": ["text"],
-                "properties": {"text": {"type": "string"}, "date": {"type": ["string", "null"]}},
+                "properties": {
+                    "text": {"type": "string"},
+                    "date": {"type": ["string", "null"], "format": "date"},
+                    "author": {"type": ["string", "null"]},
+                    "at": {"type": ["string", "null"]},
+                },
             },
             {
                 "title": "Triage",
@@ -796,6 +809,29 @@ SCHEMAS: dict[str, dict[str, object]] = {
                     "evidence",
                     "judged_status",
                 ],
+                "properties": {
+                    "task": {"type": "string"},
+                    "verdict": {
+                        "enum": [
+                            "real_pass",
+                            "false_pass",
+                            "design_bug",
+                            "tb_bug",
+                            "spec_unclear",
+                            "env_issue",
+                            "unknown",
+                        ]
+                    },
+                    "confidence": {"enum": ["high", "medium", "low"]},
+                    "summary": {"type": "string", "maxLength": 200},
+                    "evidence": {"type": "array", "items": {"type": "string"}},
+                    "judged_status": {"type": "object"},
+                    "doc": {"type": ["string", "null"]},
+                    "bugs": {"type": "array", "items": {"type": "string"}},
+                    "review": {"type": ["object", "null"]},
+                    "author": {"type": ["string", "null"]},
+                    "at": {"type": ["string", "null"]},
+                },
             },
         ],
     },
@@ -967,11 +1003,7 @@ class DoctorCheck:
 
 
 def _backend_for(config: Config) -> Backend:
-    overrides = {
-        k: shlex.join(v) if isinstance(v, list) and k not in ("error_regex", "license_regex") else v
-        for k, v in config.sim.items()
-    }
-    return get_backend(config.simulator, overrides)
+    return resolve_sim_backend(config.simulator, config.sim)
 
 
 def _extract_tool_cmd(template: str) -> str | None:

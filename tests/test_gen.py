@@ -283,6 +283,52 @@ def test_write_filelists_directives_and_verbatim_paths(tmp_path: Path) -> None:
     ) == ""
 
 
+def test_write_filelists_preserves_parent_relative_paths(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    dv_dir = repo / "dv"
+    rtl_dir = repo / "rtl"
+    dv_dir.mkdir(parents=True)
+    rtl_dir.mkdir(parents=True)
+    files = FileList(
+        groups={"rtl": ["../rtl/dut.sv"], "tb": ["verif/tb_pkg.sv"], "top": []},
+        incdirs={"rtl": ["../rtl/inc"], "tb": [], "top": []},
+        defines={"rtl": [], "tb": [], "top": []},
+        entries=[
+            FileEntry("../rtl/dut.sv", "rtl", "../rtl/filelist.py:dut.sv"),
+            FileEntry("verif/tb_pkg.sv", "tb", "verif/tb_pkg.sv"),
+        ],
+        libs={"rtl": ["-v ../rtl/cells.v", "-y ../rtl/libdir"], "tb": [], "top": []},
+    )
+    cfg = _make_config(dv_dir)
+    plan = _make_plan(builds={"default": "112233445566"})
+    write_filelists(
+        dv_dir,
+        plan,
+        files,
+        {"default": ".solouvm/build/default/112233445566"},
+        config=cfg,
+    )
+
+    build_lines = (
+        (dv_dir / ".solouvm" / "build" / "default" / "112233445566" / "filelist.f")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
+    assert "+incdir+../../../../../rtl/inc" in build_lines
+    assert "-v ../../../../../rtl/cells.v" in build_lines
+    assert "-y ../../../../../rtl/libdir" in build_lines
+    assert "../../../../../rtl/dut.sv" in build_lines
+    assert "../../../../verif/tb_pkg.sv" in build_lines
+
+    gen_lines = (
+        (dv_dir / ".solouvm" / "gen" / "filelist.f").read_text(encoding="utf-8").splitlines()
+    )
+    assert "+incdir+../rtl/inc" in gen_lines
+    assert "-v ../rtl/cells.v" in gen_lines
+    assert "-y ../rtl/libdir" in gen_lines
+    assert "../rtl/dut.sv" in gen_lines
+
+
 # ---------- makefile.py ----------
 
 

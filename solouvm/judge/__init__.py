@@ -5,11 +5,12 @@ from __future__ import annotations
 import concurrent.futures
 import contextlib
 import importlib
+import os
 import pickle
 import re
 import shlex
+import socket
 import sys
-from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, replace
@@ -17,7 +18,7 @@ from datetime import date, datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
-from solouvm.backends import get_backend
+from solouvm.backends import resolve_sim_backend
 from solouvm.collect import collect_cases
 from solouvm.errors import RunActiveError
 from solouvm.history import (
@@ -70,19 +71,22 @@ __all__ = [
 ]
 
 _TRY_DIR_RE = re.compile(r"try(\d+)\Z")
-_REGEX_LIST_FIELDS = ("error_regex", "license_regex")
 _NO_LOG_KINDS = frozenset({"build", "missing", "stale", "schema"})
-_PENDING_MAX = 64
-
-_RUN_CONTEXT_CACHE: OrderedDict[tuple[int, str], _RunMeta] = OrderedDict()
 
 
 @dataclass
 class _RunMeta:
+    run_id: str
     waivers_summary: dict[str, object]
     hints: list[str]
     project: str
     stats_by_case: dict[str, dict[str, list[float | int]]]
+
+
+class _ResultList(list[Result]):
+    """List of ``Result`` carrying run-level metadata without ``id()`` cache hazards."""
+
+    _run_meta: _RunMeta | None = None
 
 
 @dataclass
@@ -119,6 +123,7 @@ class _LocalEvalTask:
     build_error_line: int | None
     today: date
     partial: bool = False
+    stopped_early: bool = False
 
 
 @dataclass
@@ -155,15 +160,7 @@ def _empty_scan() -> ScanResult:
 
 
 def _resolve_backend(config: Config) -> Backend:
-    overrides = {
-        key: shlex.join(value)
-        if isinstance(value, list)
-        and key not in _REGEX_LIST_FIELDS
-        and all(isinstance(v, str) for v in value)
-        else value
-        for key, value in config.sim.items()
-    }
-    return get_backend(config.simulator, overrides)
+    return resolve_sim_backend(config.simulator, config.sim)
 
 
 def _transport_path(config: Config, provider: Provider, rel_path: str) -> str:
@@ -238,6 +235,7 @@ def _eval_local_attempt_worker(task: _LocalEvalTask) -> tuple[ScanResult, Verdic
         build_error_line=task.build_error_line,
         today=task.today,
         partial=task.partial,
+        stopped_early=task.stopped_early,
     )
     judged_v = apply_expect_fail(raw_v, task.case)
     return scan_res, raw_v, judged_v, log_read
@@ -256,6 +254,7 @@ def _eval_remote_attempt(
     run_id: str,
     today: date,
     partial: bool = False,
+    stopped_early: bool = False,
 ) -> tuple[ScanResult, Verdict, Verdict, bool]:
     log_rel = f"{attempt.try_rel}/sim.log"
     t_log_path = _transport_path(config, provider, log_rel)
@@ -315,6 +314,7 @@ def _eval_remote_attempt(
         build_error_line=build_status.error_line,
         today=today,
         partial=partial,
+        stopped_early=stopped_early,
     )
     judged_v = apply_expect_fail(raw_v, case)
     return scan_res, raw_v, judged_v, log_read
@@ -740,15 +740,44 @@ def compute_run_hints(
             if msg is not None and msg not in seen:
                 seen.add(msg)
                 hints.append(msg)
+    if any(
+        res.status == "fail" and res.reason == "missing SOLOUVM_DONE marker" for res in results
+    ):
+        marker_hint = "non-UVM testbench? print 'SOLOUVM_DONE status=pass' before $finish"
+        if marker_hint not in seen:
+            seen.add(marker_hint)
+            hints.append(marker_hint)
     return hints
 
 
-def _remember_run_meta(results: list[Result], run_id: str, meta: _RunMeta) -> None:
-    key = (id(results), run_id)
-    _RUN_CONTEXT_CACHE[key] = meta
-    _RUN_CONTEXT_CACHE.move_to_end(key)
-    while len(_RUN_CONTEXT_CACHE) > _PENDING_MAX:
-        _RUN_CONTEXT_CACHE.popitem(last=False)
+def _local_hostnames() -> set[str]:
+    try:
+        full = socket.gethostname()
+    except OSError:
+        return set()
+    short = full.split(".", 1)[0]
+    return {full, short} - {""}
+
+
+def _local_pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _get_run_meta(results: Sequence[Result], run_id: str) -> _RunMeta | None:
+    meta = getattr(results, "_run_meta", None)
+    if isinstance(meta, _RunMeta) and meta.run_id == run_id:
+        return meta
+    return None
 
 
 def judge_completed_attempt(
@@ -797,6 +826,8 @@ def judge_run(
     cases: list[Case] | None = None,
     allow_missing: bool = False,
     partial: bool = False,
+    stopped_early: bool = False,
+    run_finished: bool = False,
     custom_judge: Callable[[Result, Case], tuple[str, str] | None] | None = None,
     today: date | None = None,
 ) -> list[Result]:
@@ -815,15 +846,30 @@ def judge_run(
     )
     attempts_by_job = _discover_attempts(config=config, plan=plan, provider=provider)
 
-    if not partial:
-        for job_attempts in attempts_by_job.values():
-            for att in job_attempts:
-                if att.facts is not None and att.facts.state == "running":
-                    raise RunActiveError(
-                        f"run {plan.run_id} is still active",
-                        code="RUN_ACTIVE",
-                        hint="pass --partial to judge finished jobs, or wait / run 'solouvm stop'",
-                    )
+    if not partial and not run_finished:
+        done_marker = _transport_path(config, provider, f".solouvm/runs/{plan.run_id}/launch.done")
+        launch_done = provider.transport.exists(done_marker)
+        if not launch_done:
+            is_local_tp = type(provider.transport) is LocalTransport
+            local_hosts = _local_hostnames() if is_local_tp else set()
+            for job_attempts in attempts_by_job.values():
+                for att in job_attempts:
+                    if att.facts is not None and att.facts.state == "running":
+                        if (
+                            is_local_tp
+                            and att.facts.host in local_hosts
+                            and att.facts.pid > 0
+                            and not _local_pid_alive(att.facts.pid)
+                        ):
+                            continue
+                        raise RunActiveError(
+                            f"run {plan.run_id} is still active",
+                            code="RUN_ACTIVE",
+                            hint=(
+                                "pass --partial to judge finished jobs, "
+                                "or wait / run 'solouvm stop'"
+                            ),
+                        )
 
     job_cases: dict[str, Case] = {}
     job_checks: dict[str, Checks] = {}
@@ -879,6 +925,7 @@ def judge_run(
                         build_error_line=bstatus.error_line,
                         today=ref_date,
                         partial=partial,
+                        stopped_early=stopped_early,
                     )
                 )
 
@@ -924,6 +971,7 @@ def judge_run(
                     run_id=plan.run_id,
                     today=ref_date,
                     partial=partial,
+                    stopped_early=stopped_early,
                 )
                 eval_results[(job.job_id, att.try_num)] = _EvaluatedAttempt(
                     try_num=att.try_num,
@@ -941,7 +989,7 @@ def judge_run(
     medians_cache: dict[str, tuple[float | None, float | None]] = {}
     used_waiver_totals: dict[str, int] = {}
     stats_by_case: dict[str, dict[str, list[float | int]]] = {}
-    results: list[Result] = []
+    results: _ResultList = _ResultList()
 
     for job in plan.jobs:
         case = job_cases[job.job_id]
@@ -992,6 +1040,7 @@ def judge_run(
                 build_error_line=bstatus.error_line,
                 today=ref_date,
                 partial=partial,
+                stopped_early=stopped_early,
             )
             judged_v = apply_expect_fail(raw_v, case)
 
@@ -1109,15 +1158,12 @@ def judge_run(
         today=ref_date,
     )
     hints = compute_run_hints(config, cases_list, results)
-    _remember_run_meta(
-        results,
-        plan.run_id,
-        _RunMeta(
-            waivers_summary=waivers_summary,
-            hints=hints,
-            project=config.project,
-            stats_by_case=stats_by_case,
-        ),
+    results._run_meta = _RunMeta(
+        run_id=plan.run_id,
+        waivers_summary=waivers_summary,
+        hints=hints,
+        project=config.project,
+        stats_by_case=stats_by_case,
     )
     return results
 
@@ -1133,7 +1179,7 @@ def build_results_payload(
     judged_at: datetime,
 ) -> dict[str, object]:
     """Build the canonical ``results.json`` payload from judged ``Result`` objects."""
-    cached = _RUN_CONTEXT_CACHE.get((id(results), plan.run_id))
+    cached = _get_run_meta(results, plan.run_id)
     effective_waivers = waivers_summary
     if effective_waivers is None:
         if cached is not None:
@@ -1177,7 +1223,7 @@ def write_results(
 ) -> dict[str, object]:
     """Write ``results.json``, ``results.txt`` and ``junit.xml`` into ``results_dir``."""
     results_dir = Path(results_dir)
-    cached = _RUN_CONTEXT_CACHE.get((id(results), run_id))
+    cached = _get_run_meta(results, run_id)
 
     eff_waivers = waivers_summary
     eff_hints: list[str] = []

@@ -7,11 +7,14 @@ from solouvm.backends.base import Backend
 # 不确定：各版本的确切选项需逐一核对（S-10）
 VERILATOR = Backend(
     name="verilator",
-    build="verilator --binary --sv -f {filelist} --top-module {top} --Mdir {build_dir} -o {simv}",
+    build=(
+        "verilator --binary --sv --trace -f {filelist}"
+        " --top-module {top} --Mdir {build_dir} -o {simv}"
+    ),
     run="{simv}",
     simv="Vsim",
     seed="+verilator+seed+{seed}",
-    wave="--trace +trace_file={job_dir}/wave.vcd",
+    wave="+SOLOUVM_WAVE=1",
     cov_build="--coverage",
     cov_run="+verilator+coverage+file+{job_dir}/coverage.dat",
     compile_only=(
@@ -19,6 +22,6 @@ VERILATOR = Backend(
     ),
     error_regex=(r"^%Error", r"Assertion failed"),
     license_regex=(),
-    time_regex=r"-\$ .*:\$finish at (\d+)",
+    time_regex=r"(?:-\$ .*:\$finish|- Verilator: \$finish) at (\d+\s*[a-zA-Z]*)",
     version="verilator --version",
 )

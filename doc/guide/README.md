@@ -4,7 +4,7 @@
 
 > **实现状态说明**：里程碑 **M1 ~ M4** 的功能代码与自测已完整实现并主要通过内置 `fake` 仿真器与单元测试/端到端测试验证；以下两类边界需特别留意：
 > - **`待定` 需求**（见 [requirements.md §25](../requirements.md#25-里程碑归属)）：`C-07`（配置版本检查）、`F-09`（编译键排除模式）、`T-15`（随机种子历史去重）、`E-06 ~ E-08 / E-10`（静态检查深度选项）、`X-18`（磁盘空间检查）、`H-06 / H-14`（Windows/WSL2、本地并行 SSH）、`K-09 / K-10`（趋势对比与时间过滤）、`V-05`（覆盖率阈值门禁）、`W-01 ~ W-03`（`watch` / `resume` / 交互调试入口）、`AI-17 / AI-18`、`Z-08 / Z-09`（包分发与多用户隔离）、`L-07 / L-18`（`--only` 与子目录运行）**暂未纳入当前发行版本**。
-> - **需真实 EDA 环境核验事项**（见 [requirements.md §26](../requirements.md#26-不确定事项)）：涉及 VCS / Xcelium / Questa / Icarus / Verilator / `slang` / Verdi / LSF / 大规模 `.f` 与 `${VAR}` 在实机上的具体参数、输出格式与性能特征，尚未在本仓库无许可证环境中实测。
+> - **需真实 EDA 环境核验事项**（见 [requirements.md §26](../requirements.md#26-不确定事项)）：涉及 VCS / Xcelium / Questa / Xezim / Verilator / `slang` / Verdi / LSF / 大规模 `.f` 与 `${VAR}` 在实机上的具体参数、输出格式与性能特征，尚未在本仓库无许可证环境中实测。
 
 ## 核心架构（A / B 分离）
 

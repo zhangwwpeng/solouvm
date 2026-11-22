@@ -317,11 +317,15 @@ def build_plan(
         on_warning=on_warning,
     )
 
+    explicit_rng_seed = rng_seed is not None or bool(
+        os.environ.get("SOLOUVM_SHARD_SEED", "").strip()
+    )
     seed_key = (
         str(rng_seed)
         if rng_seed is not None
         else (os.environ.get("SOLOUVM_SHARD_SEED", "").strip() or run_id)
     )
+    warned_random_shard = False
     seen_cases: set[str] = set()
     jobs: list[Job] = []
     for selected in picked:
@@ -340,8 +344,28 @@ def build_plan(
             if selected.seeds is not None
             else (cli_seeds if cli_seeds is not None else config.regress.seeds)
         )
+        if (
+            shard_spec is not None
+            and not explicit_rng_seed
+            and rng is None
+            and isinstance(seed_spec, str)
+            and seed_spec.strip().startswith("random:")
+            and not warned_random_shard
+            and on_warning is not None
+        ):
+            warned_random_shard = True
+            on_warning(
+                "using --shard with 'random:N' seeds without --shard-seed or "
+                "SOLOUVM_SHARD_SEED; pass --shard-seed KEY so all shards expand identical seeds"
+            )
         case_rng = rng if rng is not None else _case_rng(seed_key, selected.name)
-        seeds = parse_seeds(seed_spec, rng=case_rng)  # type: ignore[arg-type]
+        try:
+            seeds = parse_seeds(seed_spec, rng=case_rng)  # type: ignore[arg-type]
+        except ValueError as exc:
+            raise ConfigError(
+                f"invalid seed specification {seed_spec!r}: {exc}",
+                code="CFG_INVALID",
+            ) from None
         timeout_s = parse_duration(
             selected.timeout if selected.timeout is not None else config.run.timeout
         )

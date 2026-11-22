@@ -6,6 +6,7 @@ import contextlib
 import json
 import math
 import os
+import threading
 from collections import Counter
 from collections.abc import Sequence
 from datetime import datetime
@@ -201,7 +202,7 @@ def atomic_write_text(path: Path, text: str) -> None:
         raise InfraError(
             f"failed to create directory {path.parent}: {exc}", code="PROVIDER_FAILED"
         ) from exc
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = path.parent / f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
     try:
         tmp.write_text(text, encoding="utf-8")
         os.replace(tmp, path)
@@ -383,38 +384,116 @@ def compare_results(
         )
 
     base_jobs: dict[str, dict[str, object]] = {}
+    base_by_case: dict[str, list[dict[str, object]]] = {}
     for item in baseline.get("jobs", []) or ():
         if isinstance(item, dict) and isinstance(item.get("job_id"), str):
             base_jobs[item["job_id"]] = item
+            cname = item.get("case")
+            if isinstance(cname, str) and cname:
+                base_by_case.setdefault(cname, []).append(item)
+
+    cur_items = [
+        item
+        for item in (current.get("jobs", []) or ())
+        if isinstance(item, dict) and isinstance(item.get("job_id"), str)
+    ]
+    cur_jids = {str(item["job_id"]) for item in cur_items}
+    cur_case_all_pass: dict[str, bool] = {}
+    for item in cur_items:
+        cname = item.get("case")
+        if isinstance(cname, str) and cname:
+            ok = _status_for_compare(item, mode) in PASS_STATUSES
+            cur_case_all_pass[cname] = cur_case_all_pass.get(cname, True) and ok
 
     new_failures: list[dict[str, object]] = []
     newly_fixed: list[dict[str, object]] = []
     still_failing: list[dict[str, object]] = []
+    emitted_case_fixed: set[str] = set()
 
-    for item in current.get("jobs", []) or ():
-        if not isinstance(item, dict) or not isinstance(item.get("job_id"), str):
-            continue
-        jid = item["job_id"]
+    for item in cur_items:
+        jid = str(item["job_id"])
+        cname = str(item.get("case", ""))
         cur_status = _status_for_compare(item, mode)
         cur_pass = cur_status in PASS_STATUSES
         prev = base_jobs.get(jid)
-        prev_status = _status_for_compare(prev, mode) if prev is not None else None
-        prev_pass = prev_status in PASS_STATUSES if prev_status is not None else None
+        if prev is not None:
+            prev_status: str | None = _status_for_compare(prev, mode)
+            prev_pass: bool | None = prev_status in PASS_STATUSES
+            entry = {
+                "job_id": jid,
+                "case": cname,
+                "seed": item.get("seed"),
+                "status": cur_status,
+                "prev_status": prev_status,
+                "reason": item.get("reason", ""),
+            }
+            if not cur_pass and prev_pass:
+                new_failures.append(entry)
+            elif cur_pass and not prev_pass:
+                newly_fixed.append(entry)
+            elif not cur_pass and not prev_pass:
+                still_failing.append(entry)
+            continue
 
-        entry = {
-            "job_id": jid,
-            "case": item.get("case", ""),
-            "seed": item.get("seed"),
-            "status": cur_status,
-            "prev_status": prev_status,
-            "reason": item.get("reason", ""),
-        }
-        if not cur_pass and (prev_pass is None or prev_pass):
-            new_failures.append(entry)
-        elif cur_pass and prev_pass is False:
-            newly_fixed.append(entry)
-        elif not cur_pass and prev_pass is False:
-            still_failing.append(entry)
+        # Fallback for random-seed runs where job_id changed across runs for the same case
+        case_base = [
+            b for b in base_by_case.get(cname, ()) if str(b.get("job_id", "")) not in cur_jids
+        ]
+        if not case_base:
+            if not cur_pass:
+                new_failures.append(
+                    {
+                        "job_id": jid,
+                        "case": cname,
+                        "seed": item.get("seed"),
+                        "status": cur_status,
+                        "prev_status": None,
+                        "reason": item.get("reason", ""),
+                    }
+                )
+            continue
+
+        base_statuses = [_status_for_compare(b, mode) for b in case_base]
+        first_fail_status = next((s for s in base_statuses if s not in PASS_STATUSES), None)
+        if not cur_pass:
+            if first_fail_status is not None:
+                still_failing.append(
+                    {
+                        "job_id": jid,
+                        "case": cname,
+                        "seed": item.get("seed"),
+                        "status": cur_status,
+                        "prev_status": first_fail_status,
+                        "reason": item.get("reason", ""),
+                    }
+                )
+            else:
+                new_failures.append(
+                    {
+                        "job_id": jid,
+                        "case": cname,
+                        "seed": item.get("seed"),
+                        "status": cur_status,
+                        "prev_status": base_statuses[0],
+                        "reason": item.get("reason", ""),
+                    }
+                )
+        elif (
+            first_fail_status is not None
+            and cur_case_all_pass.get(cname, False)
+            and cname not in emitted_case_fixed
+        ):
+            emitted_case_fixed.add(cname)
+            newly_fixed.append(
+                {
+                    "job_id": jid,
+                    "case": cname,
+                    "seed": item.get("seed"),
+                    "status": cur_status,
+                    "prev_status": first_fail_status,
+                    "reason": item.get("reason", ""),
+                }
+            )
 
     return {
         "baseline_run_id": baseline.get("run_id"),

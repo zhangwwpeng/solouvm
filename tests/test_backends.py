@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 import re
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 
@@ -35,7 +37,7 @@ CUSTOM = {
 
 
 def test_registry_keys():
-    assert set(BACKENDS) == {"vcs", "xrun", "questa", "iverilog", "verilator", "fake"}
+    assert set(BACKENDS) == {"vcs", "xrun", "questa", "xezim", "verilator", "fake"}
     for name, backend in BACKENDS.items():
         assert backend.name == name
 
@@ -162,16 +164,28 @@ def test_builtin_regexes_compile():
 
 
 def test_builtin_values():
-    vcs, xrun, fake = BACKENDS["vcs"], BACKENDS["xrun"], BACKENDS["fake"]
+    vcs, xrun, xezim, fake = BACKENDS["vcs"], BACKENDS["xrun"], BACKENDS["xezim"], BACKENDS["fake"]
     assert vcs.seed == "+ntb_random_seed={seed}"
     assert "-ntb_opts uvm-1.2" in vcs.build
     assert xrun.seed == "-svseed {seed}"
     assert "-uvm" in xrun.build
+    assert xezim.build == "xezim --compile -F {filelist} -s {top}"
+    assert xezim.run == "xezim -F {filelist} -s {top}"
+    assert xezim.seed == "-svseed {seed}"
+    assert xezim.wave == "--wave"
+    assert xezim.cov_build == "--code-coverage"
+    assert xezim.cov_run == "--code-coverage"
+    assert xezim.compile_only == "xezim --compile -F {filelist_tb} {fake_top} -s solouvm_fake_top"
+    assert xezim.version == "xezim --version"
     assert fake.build == "bash {root}/.solouvm/gen/bin/fake_sim.sh"
     assert fake.version.endswith("+SOLOUVM_FAKE_MODE=version")
     assert "--Mdir {build_dir}" in BACKENDS["verilator"].build
     assert re.search(xrun.time_regex, "Simulation complete via $finish(1) at time 52340 NS + 0")
     assert re.search(vcs.time_regex, "$finish called from file x.sv, line 3 at time 1200")
+    assert re.search(xezim.time_regex, "$finish called at time 50000ns")
+    with pytest.raises(ConfigError) as exc:
+        get_backend("iverilog")
+    assert exc.value.code == "CFG_INVALID"
 
 
 def test_fake_sim_source():
@@ -323,3 +337,91 @@ def test_verilator_minimal_compile_and_run(tmp_path: Path) -> None:
     assert code == 0, results
     assert payload is not None
     assert results[0].status == "pass"
+
+
+def test_xezim_stub_compile_and_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    invocations_log = tmp_path / "xezim_calls.log"
+    stub_xezim = bin_dir / "xezim"
+    stub_xezim.write_text(
+        f"""#!/usr/bin/env python3
+import os, sys
+from pathlib import Path
+
+args = sys.argv[1:]
+with open({str(invocations_log)!r}, "a", encoding="utf-8") as fh:
+    fh.write(f"cwd={{os.getcwd()}} args={{' '.join(args)}}\\n")
+
+if "-F" in args:
+    f_path = Path(args[args.index("-F") + 1])
+    assert f_path.is_file(), f"missing -F file: {{f_path}}"
+    entries = [line.strip() for line in f_path.read_text(encoding="utf-8").splitlines()
+               if line.strip() and not line.startswith("+")]
+    for entry in entries:
+        assert (f_path.parent / entry).is_file(), f"missing target: {{f_path.parent / entry}}"
+
+if "--compile" in args:
+    sys.exit(0)
+
+print("UVM_INFO tb_top.sv(10) @ 0ns: reporter [RNTST] Running test smoke_test...")
+print("UVM_INFO @ 50000ns: reporter [TEST_DONE] 'run' phase done")
+print("--- UVM Report Summary ---")
+print("** Report counts by severity")
+print("UVM_INFO :    2")
+print("UVM_WARNING :    0")
+print("UVM_ERROR :    0")
+print("UVM_FATAL :    0")
+""",
+        encoding="utf-8",
+    )
+    stub_xezim.chmod(stub_xezim.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    proj = tmp_path / "xproj"
+    proj.mkdir()
+    (proj / "tb_top.sv").write_text("module tb_top; endmodule\n", encoding="utf-8")
+    (proj / "filelist.py").write_text(
+        'FILES = {"rtl": ["tb_top.sv"], "tb": [], "top": []}\n',
+        encoding="utf-8",
+    )
+    (proj / "solouvm.conf.py").write_text(
+        'CFG = {"project": "xdemo", "simulator": "xezim", "top": "tb_top", '
+        '"uvm_test": "smoke_test"}\n',
+        encoding="utf-8",
+    )
+    (proj / "case.py").write_text(
+        (
+            "from solouvm import Case\n"
+            'CASES = [Case(name="smoke", uvm_test="smoke_test", expect=[])]\n'
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(proj)
+    files = collect_files(cfg.root, load_filelist(cfg.root))
+    plan = build_plan(
+        cases=collect_cases(cfg),
+        config=cfg,
+        selection={"seeds": "1"},
+        run_id="r-xezim",
+    )
+    results, payload, code = run_regression(
+        config=cfg,
+        plan=plan,
+        provider=get_provider(cfg),
+        files=files,
+        jobs=1,
+    )
+    assert code == 0, results
+    assert payload is not None
+    assert results[0].status == "pass"
+
+    calls = invocations_log.read_text(encoding="utf-8").splitlines()
+    assert any("--compile -F filelist.f -s tb_top" in line for line in calls)
+    assert any(
+        re.search(r"-F \.\./\.\./\.\./\.\./build/default/[^/]+/filelist\.f -s tb_top", line)
+        and "-svseed 1" in line
+        and "+UVM_TESTNAME=smoke_test" in line
+        for line in calls
+    )

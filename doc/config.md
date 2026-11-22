@@ -86,6 +86,7 @@ CFG = {
 
     "check": {"slang": "slang", "uvm_src": "${UVM_HOME}/src", "exclude": ["ip/encrypted/**"]},
     "case_dirs": ["cases"],
+    "filelist_dirs": ["../rtl"],
     "system_doc": ["doc/verif/system.md"],
     "triage": {"pass_policy": "changed", "packet_limit": 20000, "debug_dir": "docs/debug"},
     "doc": {"lang": "zh", "out": "docs/cases"},
@@ -100,7 +101,7 @@ CFG = {
 | 键 | 类型 | 默认值 | 说明 | 需求 |
 |----|------|--------|------|------|
 | `project` | str | 项目根目录名 | 出现在报告与导出文档中 | |
-| `simulator` | str | 必填 | 内置后端名：`vcs` / `xrun` / `questa` / `iverilog` / `verilator` / `fake`；其他名字需在 `sim` 中给全命令 | S |
+| `simulator` | str | 必填 | 内置后端名：`vcs` / `xrun` / `questa` / `xezim` / `verilator` / `fake`；其他名字需在 `sim` 中给全命令 | S |
 | `top` | str | 必填 | 顶层模块名，`{top}` 占位符取此值 | |
 | `uvm_test` | str \| None | `None` | case 未写 `uvm_test` 时的默认值 | |
 | `incdirs` | list[str] | `[]` | 全局 `+incdir+`，作用于所有分组 | |
@@ -115,6 +116,7 @@ CFG = {
 | `provider` | str | `"local"` | 默认使用哪个 provider；通常留给 `solouvm.local.py` 设置 | |
 | `check` | dict | 见 2.9 | fast compile 参数 | E |
 | `case_dirs` | list[str] | `[]` | 自动收集 `cases/*.py` 的目录 | M-15 |
+| `filelist_dirs` | list[str] | `[]` | 额外查找 `filelist.py` 的相对目录列表（先查项目根 `dv/`，再按序追加） | |
 | `system_doc` | list[str] | `[]` | 项目级验证说明文档，附在每个分诊上下文包中 | AI-03 |
 | `triage` | dict | 见 2.10 | 分诊策略 | AI-05 |
 | `doc` | dict | `{"lang": "zh", "out": "docs/cases"}` | 导出文档的语言与默认输出目录 | M-08 |
@@ -413,6 +415,23 @@ FILES = {
 
 - 宿主 `filelist.py` 也可以写 `DEPENDS = ["apb_agent"]`，在所有 package 加载完成后校验其依赖是否已配齐。
 - 被作为 package 收集时，`FILES` 中的相对路径、`glob`、`+incdir+`、`-f`/`-F`、`-v`/`-y` 均以该 package 根目录为基准展开，仅并入 `rtl` 与 `tb` 组（跳过 `top`）。
+
+### 4.5 多目录与 RTL 独立目录（`filelist_dirs`）
+
+当验证环境与 DUT 处于固定相对层级、但 RTL 不在 `dv/`（即 `solouvm.conf.py` 所在目录）内部时（例如同级目录 `repo/rtl` 与 `repo/dv`），可以在 `CFG["filelist_dirs"]` 中声明额外的相对目录列表：
+
+```python
+CFG = {
+    "simulator": "vcs",
+    "top": "tb_top",
+    "filelist_dirs": ["../rtl"],
+}
+```
+
+- 查找顺序：默认先检查项目根目录（`dv/`）下的 `filelist.py`（若存在则先加载），再按 `CFG["filelist_dirs"]` 声明顺序依次查找各目录中的 `filelist.py`；如设置了 `filelist_dirs` 且其中已有 `filelist.py`，项目根目录自身的 `filelist.py` 也可以省略。
+- **必须填写相对路径**（相对 `solouvm.conf.py` 所在目录，如 `../rtl`），禁止填写绝对路径（需要跨仓库或绝对路径引入外部依赖时请使用 `CFG["packages"]`）。
+- 各追加 `filelist.py` 内的相对路径、`glob`、`+incdir+`、`-f`/`-F`、`-v`/`-y` 均以该 `filelist.py` 所在目录为基准解析，并保持**相对路径**形式（如 `../rtl/...`，写入编译/check 目录 `.f` 时自动换算为 `../../../../../rtl/...` / `../../../rtl/...`），便于工作区或远端镜像保持同构搬移，且本地存在时构建键依然可复用。
+- 追加目录中的 `filelist.py` 同样支持顶层可选 `PRIORITY`（默认 100）与 `DEPENDS`；未显式覆盖 `PRIORITY` 时按「项目根 `filelist.py` → `filelist_dirs` 声明顺序」合并。
 
 ## 5. `case.py`
 

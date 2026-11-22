@@ -1020,3 +1020,25 @@ def test_incremental_detects_same_size_and_mtime_change(tmp_path: Path) -> None:
     plan2 = plan_rtl_incremental(cfg, files, backend, prov)
     assert plan2.files_to_compile == ["rtl/dut.sv"]
     assert plan2.changed_files == ["rtl/dut.sv"]
+
+
+def test_check_path_helpers_handle_sibling_rtl(tmp_path: Path) -> None:
+    from solouvm.check.slang import format_check_path, normalize_diag_path
+
+    repo = tmp_path / "repo"
+    rtl_dir = repo / "rtl"
+    dv_dir = repo / "dv"
+    rtl_dir.mkdir(parents=True)
+    dv_dir.mkdir(parents=True)
+    dut = rtl_dir / "dut.sv"
+    dut.write_text("module dut; endmodule\n", encoding="utf-8")
+
+    formatted = format_check_path(
+        dv_dir,
+        dv_dir.resolve(),
+        "../rtl/dut.sv",
+        expand_local=False,
+    )
+    assert formatted == "../../../rtl/dut.sv"
+    assert normalize_diag_path("../../../rtl/dut.sv", dv_dir) == "../rtl/dut.sv"
+    assert normalize_diag_path(str(dut), dv_dir) == Path(os.path.normpath(str(dut))).as_posix()

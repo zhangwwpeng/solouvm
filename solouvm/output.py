@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from typing import TypeVar
 
 from solouvm import ui
@@ -12,9 +13,11 @@ from solouvm.errors import SolouvmError, format_error
 SCHEMA_VERSION = 1
 
 T = TypeVar("T")
+_DEFERRED_STACK: list[list[str]] = []
 
 __all__ = [
     "SCHEMA_VERSION",
+    "defer_json_envelope",
     "emit_event",
     "emit_json",
     "emit_next",
@@ -23,6 +26,22 @@ __all__ = [
     "make_json_envelope",
     "truncate_items",
 ]
+
+
+@contextlib.contextmanager
+def defer_json_envelope() -> Iterator[None]:
+    """Buffer ``emit_json`` until context exit so ``post:main`` errors don't emit two envelopes."""
+    buf: list[str] = []
+    _DEFERRED_STACK.append(buf)
+    try:
+        yield
+    except BaseException:
+        _DEFERRED_STACK.pop()
+        raise
+    else:
+        _DEFERRED_STACK.pop()
+        for text in buf:
+            print(text, flush=True)
 
 
 def truncate_items(
@@ -76,7 +95,11 @@ def emit_json(
 ) -> None:
     """Write a single formatted JSON envelope (UTF-8, 2-space indent, newline) to stdout."""
     payload = make_json_envelope(command, data, truncated=truncated, next_=next_)
-    print(json.dumps(payload, indent=2, ensure_ascii=False), flush=True)
+    rendered = json.dumps(payload, indent=2, ensure_ascii=False)
+    if _DEFERRED_STACK:
+        _DEFERRED_STACK[-1].append(rendered)
+    else:
+        print(rendered, flush=True)
 
 
 def emit_event(event: str, **fields: object) -> None:

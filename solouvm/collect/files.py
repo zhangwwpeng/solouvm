@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import glob
 import os
+import posixpath
 import re
 import runpy
 import shlex
@@ -15,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from solouvm.collect.dotf import join_base, walk_dotf
+from solouvm.config.schema import normalize_relative_dir
 from solouvm.errors import ConfigError
 
 GROUPS = ("rtl", "tb", "top")  # 合并清单按此顺序拼接（F-04）
@@ -39,6 +41,13 @@ class LoadedFilelist:
     priority: int
     depends: tuple[str, ...]
     path: Path
+
+
+@dataclass(frozen=True)
+class ProjectFilelist:
+    rel_dir: str
+    root_dir: Path
+    meta: LoadedFilelist
 
 
 @dataclass
@@ -139,6 +148,62 @@ def load_filelist(root: Path) -> dict | list:
     return load_filelist_meta(root).spec
 
 
+def load_project_filelists(
+    root: Path,
+    filelist_dirs: Sequence[str] = (),
+) -> list[ProjectFilelist]:
+    """Load default ``<root>/filelist.py`` (if present) and append ``filelist_dirs``."""
+    norm_root = Path(os.path.normpath(Path(root).absolute()))
+    seen_dirs: set[Path] = set()
+    staged: list[tuple[int, int, ProjectFilelist]] = []
+
+    root_fl = norm_root / FILELIST_NAME
+    if root_fl.is_file():
+        meta = load_filelist_meta(norm_root)
+        seen_dirs.add(norm_root.resolve())
+        staged.append(
+            (meta.priority, 0, ProjectFilelist(rel_dir=".", root_dir=norm_root, meta=meta))
+        )
+    elif not filelist_dirs:
+        raise ConfigError(f"{FILELIST_NAME} not found in {root}", code="FILES_MISSING")
+
+    for idx, raw_dir in enumerate(filelist_dirs, start=1):
+        clean = normalize_relative_dir("filelist_dirs", raw_dir)
+        dir_path = Path(os.path.normpath(norm_root / clean))
+        if not dir_path.is_dir():
+            raise ConfigError(
+                f"filelist_dirs entry {raw_dir!r} does not exist: {dir_path}",
+                code="FILES_MISSING",
+                hint="check CFG['filelist_dirs'] in solouvm.conf.py",
+            )
+        resolved = dir_path.resolve()
+        if resolved in seen_dirs:
+            continue
+        try:
+            meta = load_filelist_meta(dir_path)
+        except ConfigError as exc:
+            if exc.code == "FILES_MISSING":
+                raise ConfigError(
+                    f"{FILELIST_NAME} not found in filelist_dirs entry {clean!r} ({dir_path})",
+                    code="FILES_MISSING",
+                    file=dir_path / FILELIST_NAME,
+                    hint=f"create {clean}/{FILELIST_NAME} or update CFG['filelist_dirs']",
+                ) from None
+            raise
+        seen_dirs.add(resolved)
+        staged.append(
+            (meta.priority, idx, ProjectFilelist(rel_dir=clean, root_dir=dir_path, meta=meta))
+        )
+
+    if not staged:
+        raise ConfigError(
+            f"{FILELIST_NAME} not found in {root} or filelist_dirs",
+            code="FILES_MISSING",
+        )
+    staged.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in staged]
+
+
 def collect_files(root: Path, spec: dict | list) -> FileList:
     """Expand ``spec`` (``FILES``) into a :class:`FileList`; paths are relative to ``root``."""
     collector = _Collector(Path(root))
@@ -149,6 +214,7 @@ def collect_files(root: Path, spec: dict | list) -> FileList:
 class _Collector:
     def __init__(self, root: Path) -> None:
         self.root = Path(os.path.normpath(root.absolute()))
+        self.resolved_root = self.root.resolve()
         self.result = FileList(
             groups={g: [] for g in GROUPS},
             incdirs={g: [] for g in GROUPS},
@@ -167,6 +233,7 @@ class _Collector:
         source_prefix: str = "",
         allowed_groups: tuple[str, ...] = GROUPS,
         use_base_for_dash_f: bool = False,
+        prefer_relative: bool = True,
     ) -> None:
         resolved_base = Path(os.path.normpath(base_dir.absolute()))
         for group, entries in _groups(spec).items():
@@ -179,6 +246,7 @@ class _Collector:
                     base_dir=resolved_base,
                     source_prefix=source_prefix,
                     use_base_for_dash_f=use_base_for_dash_f,
+                    prefer_relative=prefer_relative,
                 )
 
     def finalize(self) -> FileList:
@@ -199,6 +267,7 @@ class _Collector:
         base_dir: Path,
         source_prefix: str,
         use_base_for_dash_f: bool,
+        prefer_relative: bool,
     ) -> None:
         if not isinstance(entry, str) or not entry.strip():
             raise ConfigError(
@@ -217,10 +286,12 @@ class _Collector:
                     raise ConfigError(
                         f"FILES[{group!r}]: option {token} in {entry!r} needs an argument"
                     )
-                arg = join_base(base_dir, tokens[i + 1])
+                raw_arg = tokens[i + 1]
+                arg = join_base(base_dir, raw_arg)
                 i += 2
+                arg_is_rel = prefer_relative and not os.path.isabs(raw_arg) and "$" not in raw_arg
                 if token in ("-v", "-y"):
-                    self._lib(group, f"{token} {self._norm(arg)[0]}")
+                    self._lib(group, f"{token} {self._norm(arg, prefer_relative=arg_is_rel)[0]}")
                 else:
                     self._dotf(
                         group,
@@ -230,11 +301,12 @@ class _Collector:
                         base_dir=base_dir,
                         source_prefix=source_prefix,
                         use_base_for_dash_f=use_base_for_dash_f,
+                        prefer_relative=arg_is_rel,
                     )
                 continue
             i += 1
             if token.startswith(("+incdir+", "+define+", "+libext+")):
-                self._plus(group, token, base_dir)
+                self._plus(group, token, base_dir, prefer_relative=prefer_relative)
             elif token.startswith(("-", "+")):
                 raise ConfigError(f"FILES[{group!r}]: unsupported option {token!r} in {entry!r}")
             else:
@@ -245,6 +317,7 @@ class _Collector:
                     source=src,
                     label=f"{group}: {src}",
                     base=base_dir,
+                    prefer_relative=prefer_relative,
                 )
 
     def _dotf(
@@ -257,6 +330,7 @@ class _Collector:
         base_dir: Path,
         source_prefix: str,
         use_base_for_dash_f: bool,
+        prefer_relative: bool,
     ) -> None:
         try:
             items = walk_dotf(
@@ -272,15 +346,20 @@ class _Collector:
         i = 0
         while i < len(items):
             token, dotf, joined = items[i]
-            source = f"{source_prefix}{self._norm(str(dotf))[0]}"
+            source = f"{source_prefix}{self._norm(str(dotf), prefer_relative=prefer_relative)[0]}"
             if token in ("-v", "-y"):
-                self._lib(group, f"{token} {self._norm(items[i + 1][0])[0]}")
+                arg_path, _, arg_joined = items[i + 1]
+                norm_arg = self._norm(
+                    arg_path,
+                    prefer_relative=(prefer_relative and arg_joined),
+                )[0]
+                self._lib(group, f"{token} {norm_arg}")
                 i += 2
                 continue
             i += 1
             if token.startswith("+"):
                 # walk_dotf 已把 +incdir+ 的目录拼好了基准目录
-                self._plus(group, token, None)
+                self._plus(group, token, None, prefer_relative=(prefer_relative and joined))
             else:
                 self._path(
                     group,
@@ -288,15 +367,27 @@ class _Collector:
                     source=source,
                     label=f"{group}: {token} (from {source})",
                     written_absolute=not joined,
+                    prefer_relative=(prefer_relative and joined),
                 )
 
     # ------------------------------------------------------------ 分类
 
-    def _plus(self, group: str, token: str, base: Path | None) -> None:
+    def _plus(
+        self,
+        group: str,
+        token: str,
+        base: Path | None,
+        *,
+        prefer_relative: bool = False,
+    ) -> None:
         if token.startswith("+incdir+"):
             for item in filter(None, token.removeprefix("+incdir+").split("+")):
+                use_rel = prefer_relative and (
+                    base is None or (not os.path.isabs(item) and "$" not in item)
+                )
                 path = join_base(base, item) if base is not None else item
-                _append_unique(self.result.incdirs[group], self._norm(path)[0])
+                norm_inc = self._norm(path, prefer_relative=use_rel)[0]
+                _append_unique(self.result.incdirs[group], norm_inc)
         elif token.startswith("+define+"):
             for item in filter(None, token.removeprefix("+define+").split("+")):
                 _append_unique(self.result.defines[group], item)
@@ -315,6 +406,7 @@ class _Collector:
         label: str,
         base: Path | None = None,
         written_absolute: bool | None = None,
+        prefer_relative: bool = False,
     ) -> None:
         if "$" in token:
             # 环境变量原样保留，由 B 上的仿真器展开；A 无法检查是否存在
@@ -329,14 +421,16 @@ class _Collector:
             if not hits:
                 self.missing.append(label)
                 return
+            use_rel = prefer_relative and not os.path.isabs(token)
             # glob 顺序不保证：按完整相对路径排序（N-11）
-            for path, outside in sorted(self._norm(h) for h in hits):
+            for path, outside in sorted(self._norm(h, prefer_relative=use_rel) for h in hits):
                 self._add(group, path, source, outside=outside)
             return
         full = join_base(base, token) if base is not None else token
-        path, outside = self._norm(full)
         if written_absolute is None:
             written_absolute = os.path.isabs(token)
+        use_rel = prefer_relative and not written_absolute
+        path, outside = self._norm(full, prefer_relative=use_rel)
         # 用户直接写的根外绝对路径要求 B 上存在，A 上不一定有，不检查（F-07）
         if not (outside and written_absolute) and not os.path.isfile(full):
             self.missing.append(label)
@@ -350,8 +444,20 @@ class _Collector:
         self.result.groups[group].append(path)
         self.result.entries.append(FileEntry(path, group, source, outside))
 
-    def _norm(self, raw: str) -> tuple[str, bool]:
-        """Return (path, outside_root): in-root paths become root-relative POSIX paths."""
+    def _relpath_from_root(self, path: Path) -> str:
+        rel_raw = os.path.relpath(str(path), str(self.root))
+        try:
+            rel_res = os.path.relpath(str(path.resolve()), str(self.resolved_root))
+        except OSError:
+            rel_res = rel_raw
+        best = min((rel_raw, rel_res), key=lambda r: (len(Path(r).parts), len(r)))
+        best = best.replace(os.sep, "/")
+        if os.altsep:
+            best = best.replace(os.altsep, "/")
+        return posixpath.normpath(best)
+
+    def _norm(self, raw: str, *, prefer_relative: bool = False) -> tuple[str, bool]:
+        """Return (path, outside_root): in-root and relative parent paths stay POSIX-relative."""
         if "$" in raw:
             return raw, False
         path = Path(os.path.normpath(raw if os.path.isabs(raw) else self.root / raw))
@@ -361,8 +467,10 @@ class _Collector:
             pass
         try:
             # 符号链接（如 macOS 的 /var -> /private/var）展开后再判断一次
-            return path.resolve().relative_to(self.root.resolve()).as_posix(), False
+            return path.resolve().relative_to(self.resolved_root).as_posix(), False
         except ValueError:
+            if prefer_relative:
+                return self._relpath_from_root(path), False
             return str(path), True
 
 

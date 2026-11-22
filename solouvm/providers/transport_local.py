@@ -40,7 +40,7 @@ class LocalTransport:
         work_dir = str(self._resolve(cwd))
         log_command(cmd)
         try:
-            proc = subprocess.run(cmd, cwd=work_dir, check=False)
+            proc = subprocess.run(cmd, cwd=work_dir, stdin=subprocess.DEVNULL, check=False)
         except OSError as exc:
             raise InfraError(
                 f"failed to execute {cmd[0]!r}: {exc}",
@@ -66,6 +66,7 @@ class LocalTransport:
             proc = subprocess.run(
                 cmd,
                 cwd=work_dir,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -98,6 +99,7 @@ class LocalTransport:
             proc = subprocess.run(
                 cmd,
                 cwd=work_dir,
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -125,7 +127,12 @@ class LocalTransport:
         work_dir = str(self._resolve(cwd))
         log_command(cmd)
         try:
-            return subprocess.Popen(cmd, cwd=work_dir, start_new_session=True)
+            return subprocess.Popen(
+                cmd,
+                cwd=work_dir,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
         except OSError as exc:
             raise InfraError(
                 f"failed to spawn {cmd[0]!r}: {exc}",

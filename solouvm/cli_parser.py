@@ -127,6 +127,7 @@ def build_parser(handlers: dict[str, Handler]) -> argparse.ArgumentParser:
 
     # Preparation & inspection
     p = _add_sub(sub, "init", "init", handlers, common, "Initialize a starter project")
+    p.add_argument("dir", nargs="?", default=None, help="Target project directory (default: cwd)")
     p.add_argument("--simulator", default="fake", help="Simulator backend (default: fake)")
     p.add_argument("--agents", default=None, help="Generate subagent templates (e.g. claude)")
     p.add_argument("--bare", action="store_true", help="Only create config files")

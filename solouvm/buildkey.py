@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -20,13 +21,43 @@ if TYPE_CHECKING:
     from solouvm.collect.files import FileList
     from solouvm.config.schema import Config
 
-__all__ = ["BUILDKEY_LEN", "BuildKeyResult", "compute_build_key", "compute_build_keys"]
+__all__ = [
+    "BUILDKEY_LEN",
+    "BuildKeyResult",
+    "compute_build_key",
+    "compute_build_keys",
+    "strip_sv_comments",
+]
 
 BUILDKEY_LEN = 12
 _CACHE_SCHEMA = 1
 _CACHE_REL = Path(".solouvm") / "cache" / "hash.json"
 _CHUNK_SIZE = 65536
 _SHA1_HEX_LEN = 40
+_SV_TOKEN_RE = re.compile(r"\x22(?:\x5c.|[^\x22\x5c\n])*\x22|//[^\n]*|/\*[\s\S]*?\*/")
+_SV_INCLUDE_RE = re.compile(r"\x60\s*include\s*\x22([^\x22\r\n]+)\x22")
+
+
+def strip_sv_comments(text: str, *, blank_strings: bool = False) -> str:
+    """Strip ``//`` and ``/* ... */`` comments while respecting SV string literals."""
+
+    def _repl(match: re.Match[str]) -> str:
+        tok = match.group(0)
+        if tok.startswith('"'):
+            return '""' if blank_strings else tok
+        nl_count = tok.count("\n")
+        return "\n" * nl_count if nl_count else " "
+
+    return _SV_TOKEN_RE.sub(_repl, text)
+
+
+def _scan_sv_includes(path: Path) -> list[str]:
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    stripped = strip_sv_comments(raw, blank_strings=False)
+    return [m.group(1).strip() for m in _SV_INCLUDE_RE.finditer(stripped) if m.group(1).strip()]
 
 
 @dataclass
@@ -228,6 +259,22 @@ def _dedupe_preserve(items: Iterable[str]) -> list[str]:
     return out
 
 
+def _resolve_include(
+    inc_name: str,
+    including_file: Path,
+    incdir_paths: list[Path],
+    root: Path,
+) -> Path | None:
+    if os.path.isabs(inc_name):
+        cand = Path(os.path.normpath(inc_name))
+        return cand if cand.is_file() else None
+    for base in (including_file.parent, *incdir_paths, root):
+        cand = Path(os.path.normpath(base / inc_name))
+        if cand.is_file():
+            return cand
+    return None
+
+
 def compute_build_keys(
     *,
     config: Config,
@@ -239,6 +286,7 @@ def compute_build_keys(
     solouvm_version: str = "0.1.0",
     provider: str | None = None,
     provider_setup: str | None = None,
+    save_cache: bool = True,
 ) -> BuildKeyResult:
     """Compute 12-char sha1 build keys for ``modes`` and cache file hashes on A."""
     mode_list = sorted(set(modes))
@@ -262,11 +310,18 @@ def compute_build_keys(
 
     keys: dict[str, str] = {}
     non_reusable: dict[str, list[str]] = {}
+    includes_cache: dict[Path, list[str]] = {}
+
+    def _includes_of(path: Path) -> list[str]:
+        if path not in includes_cache:
+            includes_cache[path] = _scan_sv_includes(path)
+        return includes_cache[path]
 
     for mode in mode_list:
         build_cfg = config.builds[mode]
         hasher = hashlib.sha1()
         reasons: list[str] = []
+        source_paths: list[Path] = []
 
         _feed(
             hasher,
@@ -305,15 +360,17 @@ def compute_build_keys(
                 reasons.append(f"file path uses B-side env var: {raw_file}")
                 continue
             full, is_outside = _resolve_path(root, resolved_root, raw_file)
-            if outside_map.get(raw_file, False) or is_outside:
+            if outside_map.get(raw_file, False) or (is_outside and os.path.isabs(raw_file)):
                 reasons.append(f"file is outside project root: {raw_file}")
                 if full.is_file():
+                    source_paths.append(full)
                     with contextlib.suppress(OSError):
                         _feed(hasher, "file", raw_file, cache.file_sha1(full))
                 continue
             if not full.is_file():
                 reasons.append(f"file not found on A: {raw_file}")
                 continue
+            source_paths.append(full)
             try:
                 _feed(hasher, "file", raw_file, cache.file_sha1(full))
             except OSError as exc:
@@ -326,17 +383,21 @@ def compute_build_keys(
                 *(d for g in all_groups for d in files.incdirs.get(g, [])),
             ]
         )
+        incdir_paths: list[Path] = []
         for incdir in incdirs:
             if "$" in incdir:
                 reasons.append(f"incdir uses B-side env var: {incdir}")
                 continue
             full, is_outside = _resolve_path(root, resolved_root, incdir)
-            if is_outside:
+            if is_outside and os.path.isabs(incdir):
                 reasons.append(f"incdir is outside project root: {incdir}")
+                if full.is_dir():
+                    incdir_paths.append(full)
                 continue
             if not full.is_dir():
                 reasons.append(f"incdir not found on A: {incdir}")
                 continue
+            incdir_paths.append(full)
             _hash_directory(hasher, cache, reasons, tag="incdir_file", label=incdir, directory=full)
 
         for group in all_groups:
@@ -347,12 +408,13 @@ def compute_build_keys(
                         reasons.append(f"-v library uses B-side env var: {target}")
                         continue
                     full, is_outside = _resolve_path(root, resolved_root, target)
-                    if is_outside:
+                    if is_outside and os.path.isabs(target):
                         reasons.append(f"-v library is outside project root: {target}")
                         continue
                     if not full.is_file():
                         reasons.append(f"-v library not found on A: {target}")
                         continue
+                    source_paths.append(full)
                     try:
                         _feed(hasher, "lib_v", target, cache.file_sha1(full))
                     except OSError as exc:
@@ -363,7 +425,7 @@ def compute_build_keys(
                         reasons.append(f"-y directory uses B-side env var: {target}")
                         continue
                     full, is_outside = _resolve_path(root, resolved_root, target)
-                    if is_outside:
+                    if is_outside and os.path.isabs(target):
                         reasons.append(f"-y directory is outside project root: {target}")
                         continue
                     if not full.is_dir():
@@ -373,6 +435,33 @@ def compute_build_keys(
                         hasher, cache, reasons, tag="lib_y_file", label=target, directory=full
                     )
 
+        # Recursively hash SV `include "..." headers referenced by source files
+        seen_includes: set[Path] = set()
+        queue: list[Path] = list(source_paths)
+        resolved_inc_digests: list[tuple[str, str]] = []
+        while queue:
+            src_file = queue.pop(0)
+            for inc_name in _includes_of(src_file):
+                if "$" in inc_name:
+                    reasons.append(f"include path uses B-side env var: {inc_name}")
+                    continue
+                inc_full = _resolve_include(inc_name, src_file, incdir_paths, root)
+                if inc_full is None or inc_full in seen_includes:
+                    continue
+                seen_includes.add(inc_full)
+                queue.append(inc_full)
+                _, inc_outside = _resolve_path(root, resolved_root, str(inc_full))
+                if inc_outside and os.path.isabs(inc_name):
+                    reasons.append(f"included file is outside project root: {inc_name}")
+                try:
+                    digest = cache.file_sha1(inc_full)
+                except OSError as exc:
+                    reasons.append(f"unreadable included file on A ({inc_name}: {exc})")
+                    continue
+                resolved_inc_digests.append((cache._cache_key(inc_full), digest))
+        for inc_key, digest in sorted(resolved_inc_digests):
+            _feed(hasher, "include_file", inc_key, digest)
+
         if reasons:
             unique_reasons = _dedupe_preserve(reasons)
             non_reusable[mode] = unique_reasons
@@ -380,7 +469,8 @@ def compute_build_keys(
 
         keys[mode] = hasher.hexdigest()[:BUILDKEY_LEN]
 
-    cache.save()
+    if save_cache:
+        cache.save()
     return BuildKeyResult(keys=keys, non_reusable=non_reusable)
 
 

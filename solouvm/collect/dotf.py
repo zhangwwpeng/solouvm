@@ -62,10 +62,12 @@ def walk_dotf(
         if token in _FILE_OPTS or token in _LIB_OPTS:
             if i + 1 >= len(tokens):
                 raise ConfigError(f"{path}: option {token} needs an argument", code="CFG_INVALID")
-            arg = join_base(base, tokens[i + 1])
+            raw_arg = tokens[i + 1]
+            arg = join_base(base, raw_arg)
             i += 2
             if token in _LIB_OPTS:
-                out += [(token, path, False), (arg, path, False)]
+                arg_rel = not os.path.isabs(raw_arg) and "$" not in raw_arg
+                out += [(token, path, False), (arg, path, arg_rel)]
                 continue
             out += walk_dotf(
                 Path(arg),
@@ -78,14 +80,17 @@ def walk_dotf(
         i += 1
         if token.startswith("+incdir+"):
             dirs = [d for d in token.removeprefix("+incdir+").split("+") if d]
-            out += [("+incdir+" + join_base(base, d), path, False) for d in dirs]
+            out += [
+                ("+incdir+" + join_base(base, d), path, not os.path.isabs(d) and "$" not in d)
+                for d in dirs
+            ]
         elif token.startswith(_PLUS_OPTS):
             out.append((token, path, False))
         elif token.startswith(("-", "+")):
             raise ConfigError(f"{path}: unsupported .f option {token!r}", code="CFG_INVALID")
         else:
-            joined = join_base(base, token)
-            out.append((joined, path, joined != token))
+            is_rel = not os.path.isabs(token) and "$" not in token
+            out.append((join_base(base, token), path, is_rel))
     return out
 
 

@@ -24,7 +24,7 @@
 ## Key Subcommands by Task
 
 - **Setup & Inspect**:
-  - `init [--simulator fake|vcs|xrun|questa|iverilog|verilator] [--bare] [--agents claude]`
+  - `init [--simulator fake|vcs|xrun|questa|xezim|verilator] [--bare] [--agents claude]`
   - `config [KEY]`, `files`, `validate`, `schema [job.facts|plan|results|tasks|json_envelope]`, `doctor`, `help [TOPIC]`
 - **UVM Scaffolding**:
   - `new agent|env|test|seq|vseq NAME [--env E] [--agent A] [--agents A,B]`

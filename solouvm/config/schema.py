@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import posixpath
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from solouvm.backends import EXTRA_SIM_KEYS
 from solouvm.backends.base import override_keys
 from solouvm.errors import ConfigError
 from solouvm.model import Checks, Waiver
@@ -56,6 +58,7 @@ DEFAULTS: dict[str, object] = {
         "where": "auto",
     },
     "case_dirs": [],
+    "filelist_dirs": [],
     "system_doc": [],
     "triage": {
         "pass_policy": "changed",
@@ -164,6 +167,36 @@ def v_str_list(path: str, value: object) -> object:
     if not isinstance(value, (list, tuple)) or not all(isinstance(v, str) for v in value):
         raise invalid(path, "list[str]", value)
     return list(value)
+
+
+def normalize_relative_dir(path: str, item: object) -> str:
+    """Validate and normalize a relative directory entry (reject empty, newlines, absolute)."""
+    if not isinstance(item, str) or not item.strip():
+        raise invalid(path, "non-empty relative directory path", item)
+    if "\n" in item or "\r" in item:
+        raise ConfigError(f"{path}: directory {item!r} cannot contain newlines", code="CFG_INVALID")
+    clean = item.strip()
+    if (
+        Path(clean).is_absolute()
+        or clean.startswith(("/", "\\"))
+        or (len(clean) >= 2 and clean[1] == ":")
+    ):
+        raise ConfigError(
+            f"{path}: directory {item!r} must be a relative path from project root "
+            "(e.g. '../rtl')",
+            code="CFG_INVALID",
+            hint=(
+                "use a relative path matching the RTL/DV layout, "
+                "or use CFG['packages'] for external absolute paths"
+            ),
+        )
+    norm = posixpath.normpath(clean.replace("\\", "/"))
+    return "." if norm == "" else norm
+
+
+def v_relative_dir_list(path: str, value: object) -> object:
+    items = v_str_list(path, value)
+    return [normalize_relative_dir(path, item) for item in items]  # type: ignore[union-attr]
 
 
 def v_str_or_list(path: str, value: object) -> object:
@@ -301,8 +334,8 @@ SPEC: dict[str, object] = {
         "waivers": v_waivers,
     },
     "job": {"pre": v_str, "post": v_str},
-    # 命令可写成字符串或列表；类型细节在合并后交给 get_backend 校验
-    "sim": dict.fromkeys(sorted(override_keys()), v_any),
+    # 命令可写成字符串或列表；类型细节在合并后交给 resolve_sim_backend 校验
+    "sim": dict.fromkeys(sorted(override_keys() | EXTRA_SIM_KEYS), v_any),
     "providers": {ANY_KEY: PROVIDER_SPEC},
     "provider": v_nonempty_str,
     "check": {
@@ -314,6 +347,7 @@ SPEC: dict[str, object] = {
         "where": v_choice("local", "remote", "auto"),
     },
     "case_dirs": v_str_list,
+    "filelist_dirs": v_relative_dir_list,
     "system_doc": v_str_list,
     "triage": {
         "pass_policy": v_choice("none", "changed", "all"),
@@ -483,4 +517,5 @@ class Config:
     plugins: list[str]
     uvm: UvmConfig
     packages: dict[str, PackageConfig] = field(default_factory=dict)
+    filelist_dirs: list[str] = field(default_factory=list)
     sources: dict[str, str] = field(default_factory=dict)  # 键路径 -> default|conf|local|cli

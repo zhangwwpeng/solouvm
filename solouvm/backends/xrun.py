@@ -7,11 +7,14 @@ from solouvm.backends.base import Backend
 # 不确定：各版本的确切选项需逐一核对（S-10）
 XRUN = Backend(
     name="xrun",
-    build="xrun -uvm -f {filelist} -top {top} -elaborate",
-    run="xrun -R",
+    build="xrun -uvm -xmlibdirpath {build_dir} -f {filelist} -top {top} -elaborate",
+    run="xrun -R -xmlibdirpath {build_dir}",
     simv="xrun.key",
     seed="-svseed {seed}",
-    wave="-input wave.tcl",
+    wave=(
+        "-input '@database -open waves -into {job_dir}/waves.shm -default; "
+        "probe -create -shm -all -depth all; run; exit'"
+    ),
     cov_build="-coverage all",
     cov_run="-coverage all -covworkdir {job_dir}/cov_work",
     # fast-compile.md §3.3 的示意命令

@@ -13,7 +13,7 @@ from collections.abc import Callable
 from difflib import get_close_matches
 from pathlib import Path
 
-from solouvm.backends import get_backend
+from solouvm.backends import resolve_sim_backend
 from solouvm.config.schema import (
     ANY_KEY,
     BUILD_DEFAULTS,
@@ -57,10 +57,6 @@ from solouvm.providers.base import (
 CONF_NAME = "solouvm.conf.py"
 LOCAL_NAME = "solouvm.local.py"
 SHADOW_NAME = "solouvm.py"
-
-# builds / providers 的名字会出现在目录名与命令行里，限制字符集
-# sim 中按正则列表处理的字段，其余字段写成列表时视为命令
-_REGEX_LIST_FIELDS = ("error_regex", "license_regex")
 
 _NAME_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*\Z")
 
@@ -520,6 +516,7 @@ def _build(root: Path, merged: dict, sources: dict[str, str]) -> Config:
         limits=LimitsConfig(**merged["limits"]),
         plugins=merged["plugins"],
         packages=_build_packages(merged["packages"]),
+        filelist_dirs=merged["filelist_dirs"],
         uvm=UvmConfig(**merged["uvm"]),
         sources=sources,
     )
@@ -613,15 +610,7 @@ def _build_checks(data: dict) -> Checks:
 
 def _check_backend(simulator: str, sim: dict) -> None:
     """Validate ``sim`` against the backend; list commands are allowed (config.md §2.7)."""
-    overrides = {
-        key: shlex.join(value)
-        if isinstance(value, list)
-        and key not in _REGEX_LIST_FIELDS
-        and all(isinstance(v, str) for v in value)
-        else value
-        for key, value in sim.items()
-    }
-    get_backend(simulator, overrides)
+    resolve_sim_backend(simulator, sim)
 
 
 def _is_str_list(val: object) -> bool:

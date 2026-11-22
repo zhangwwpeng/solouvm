@@ -88,6 +88,7 @@ def _render_conf(*, simulator: str, bare: bool) -> str:
                 "max_uvm_fatal": 0,
             }},
             "case_dirs": [],
+            "filelist_dirs": [],
             "system_doc": {sys_doc},
         }}
         """

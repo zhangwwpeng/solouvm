@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from solouvm.buildkey import strip_sv_comments
 from solouvm.check.faketop import (
     ensure_check_scripts,
     parse_simulator_diagnostics,
@@ -28,6 +29,7 @@ from solouvm.check.slang import (
 )
 from solouvm.errors import ConfigError, InfraError
 from solouvm.gen.shell import check_no_newlines
+from solouvm.packages import package_sync_files
 
 if TYPE_CHECKING:
     from solouvm.backends.base import Backend
@@ -53,7 +55,6 @@ FAST_STATE_REL = Path(CHECK_REL_DIR) / "fast_state.json"
 INCREMENTAL_BACKENDS = frozenset({"vcs", "xrun"})
 
 _CHUNK_SIZE = 65536
-_COMMENT_RE = re.compile(r"//[^\n]*|/\*.*?\*/", re.DOTALL)
 _PACKAGE_RE = re.compile(r"^\s*package\s+(?:automatic\s+|static\s+)?(\w+)\s*;", re.MULTILINE)
 _IMPORT_RE = re.compile(r"\bimport\s+(\w+)\s*::")
 _INCLUDE_STR_RE = re.compile(r'`include\s+"([^"\n]+)"')
@@ -94,11 +95,8 @@ def _sha1_file(path: Path) -> str:
     return hasher.hexdigest()
 
 
-def _strip_sv_comments(text: str) -> str:
-    def repl(match: re.Match[str]) -> str:
-        return re.sub(r"[^\n]", " ", match.group(0))
-
-    return _COMMENT_RE.sub(repl, text)
+def _strip_sv_comments(text: str, *, blank_strings: bool = True) -> str:
+    return strip_sv_comments(text, blank_strings=blank_strings)
 
 
 def read_fast_state(path: Path) -> dict[str, object] | None:
@@ -289,16 +287,17 @@ def _scan_file_deps(
 
     raw_text = raw_bytes.decode("utf-8", errors="replace")
 
-    cleaned = _strip_sv_comments(raw_text)
+    cleaned = _strip_sv_comments(raw_text, blank_strings=True)
+    cleaned_with_strings = _strip_sv_comments(raw_text, blank_strings=False)
     packages = list(dict.fromkeys(m.group(1) for m in _PACKAGE_RE.finditer(cleaned)))
     imports = list(dict.fromkeys(m.group(1) for m in _IMPORT_RE.finditer(cleaned)))
     has_macros = bool(_MACRO_DEFINE_RE.search(cleaned))
-    untrackable = bool(_INCLUDE_MACRO_RE.search(cleaned))
+    untrackable = bool(_INCLUDE_MACRO_RE.search(cleaned_with_strings))
     ambiguous = untrackable
 
     resolved_includes: list[str] = []
     inc_targets: list[tuple[Path, str]] = []
-    for inc_match in _INCLUDE_STR_RE.finditer(cleaned):
+    for inc_match in _INCLUDE_STR_RE.finditer(cleaned_with_strings):
         inc_name = inc_match.group(1).strip()
         hits, inc_ambig, inc_unres = _resolve_include_target(
             inc_name, file_path, incdir_paths, root
@@ -704,7 +703,13 @@ def run_incremental_rtl(
         ]
     primary_bin = cmd_tokens[0]
 
-    push_files = [*script_files, f"{CHECK_REL_DIR}/filelist.rtl.inc.f"]
+    push_files = sorted(
+        {
+            *script_files,
+            f"{CHECK_REL_DIR}/filelist.rtl.inc.f",
+            *package_sync_files(root, config),
+        }
+    )
     rc, log_text, duration_s = run_check_job(
         root=root,
         provider=provider,

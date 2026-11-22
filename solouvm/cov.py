@@ -10,8 +10,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from solouvm.backends import get_backend
-from solouvm.backends.base import override_keys
+from solouvm.backends import resolve_sim_backend
 from solouvm.errors import ConfigError, InfraError
 from solouvm.gen.shell import check_no_newlines, sh_quote
 
@@ -26,24 +25,33 @@ __all__ = ["cov_merge", "cov_report"]
 _SUPPORTED_RESULTS_SCHEMA = 1
 _PASSED_STATUSES = frozenset({"pass", "xfail"})
 
-_ALL_COV_DBS: tuple[str, ...] = ("cov.vdb", "cov_work", "cov.ucdb", "coverage.dat")
+_ALL_COV_DBS: tuple[str, ...] = (
+    "cov.vdb",
+    "cov_work",
+    "cov.ucdb",
+    "coverage.dat",
+    "xezim_cov.json",
+)
 _BACKEND_COV_DB: dict[str, str] = {
     "vcs": "cov.vdb",
     "xrun": "cov_work",
     "questa": "cov.ucdb",
     "verilator": "coverage.dat",
+    "xezim": "xezim_cov.json",
 }
 _MERGED_DB_NAME: dict[str, str] = {
     "vcs": "merged.vdb",
     "xrun": "merged",
     "questa": "merged.ucdb",
     "verilator": "merged.dat",
+    "xezim": "merged_cov.json",
 }
 _BUILTIN_COV_TOOLS: dict[str, str] = {
     "vcs": "urg",
     "xrun": "imc",
     "questa": "vcover",
     "verilator": "verilator_coverage",
+    "xezim": "xezim-json",
 }
 
 _HEADER_ALIAS: dict[str, str] = {
@@ -114,9 +122,15 @@ _TABLE_VAL_RE = re.compile(r"^(?:(\d+(?:\.\d+)?)%?|--|n/?a)$", re.IGNORECASE)
 
 
 def _resolve_backend(config: Config) -> Backend:
-    allowed = override_keys()
-    overrides = {k: v for k, v in config.sim.items() if k in allowed}
-    return get_backend(config.simulator, overrides)
+    return resolve_sim_backend(config.simulator, config.sim)
+
+
+def _tcl_quote(value: str) -> str:
+    check_no_newlines(value, field="tcl path")
+    if any(ch in value for ch in (" ", "\t", "$", "[", "]", ";", "\x22")):
+        escaped = value.replace("{", r"\{").replace("}", r"\}")
+        return "{" + escaped + "}"
+    return value
 
 
 def _load_results(
@@ -402,13 +416,148 @@ def _resolve_merged_target(
     db_name = _MERGED_DB_NAME.get(backend_name)
     if db_name is None:
         return merged_dir, merged_dir
-    if merged_dir.endswith((".vdb", ".ucdb", ".dat")):
+    if merged_dir.endswith((".vdb", ".ucdb", ".dat", ".json")):
         parent = posixpath.dirname(merged_dir) or "."
         return parent, merged_dir
     candidate = posixpath.join(merged_dir, db_name)
     if provider.transport.exists(candidate) or not provider.transport.exists(merged_dir):
         return merged_dir, candidate
     return merged_dir, candidate
+
+
+def _merge_hit_dict(dst: dict[str, int], src: Mapping[object, object], prefix: str = "") -> None:
+    for raw_k, raw_v in src.items():
+        key = f"{prefix}{raw_k}"
+        if isinstance(raw_v, int) and not isinstance(raw_v, bool):
+            dst[key] = dst.get(key, 0) + max(0, raw_v)
+        elif isinstance(raw_v, bool):
+            dst[key] = dst.get(key, 0) + (1 if raw_v else 0)
+        elif isinstance(raw_v, Mapping):
+            _merge_hit_dict(dst, raw_v, prefix=f"{key}:")
+
+
+def _merge_xezim_json(
+    provider: Provider,
+    db_paths: Sequence[str],
+    merged_target: str,
+) -> str:
+    buckets: dict[str, dict[str, int]] = {}
+    fallback_pct: dict[str, float] = {}
+    bucket_keys = {
+        "lines": "line",
+        "line": "line",
+        "branches": "branch",
+        "branch": "branch",
+        "toggles": "toggle",
+        "toggle": "toggle",
+        "conditions": "cond",
+        "cond": "cond",
+        "fsm": "fsm",
+    }
+    for db in db_paths:
+        raw = _read_optional_file(provider, db)
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise InfraError(
+                f"invalid xezim coverage JSON in {db}: {exc}",
+                code="PROVIDER_FAILED",
+            ) from exc
+        if not isinstance(data, Mapping):
+            raise InfraError(
+                f"invalid xezim coverage JSON in {db}: expected object",
+                code="PROVIDER_FAILED",
+            )
+        for raw_k, canonical in bucket_keys.items():
+            val = data.get(raw_k)
+            if isinstance(val, Mapping):
+                _merge_hit_dict(buckets.setdefault(canonical, {}), val)
+        files_map = data.get("files")
+        if isinstance(files_map, Mapping):
+            for fname, fentry in files_map.items():
+                if isinstance(fentry, Mapping):
+                    for raw_k, canonical in bucket_keys.items():
+                        sub = fentry.get(raw_k)
+                        if isinstance(sub, Mapping):
+                            _merge_hit_dict(
+                                buckets.setdefault(canonical, {}), sub, prefix=f"{fname}:"
+                            )
+        for summary_key in ("summary", "metrics"):
+            smap = data.get(summary_key)
+            if isinstance(smap, Mapping):
+                for sk, sv in smap.items():
+                    canon = _HEADER_ALIAS.get(str(sk).lower())
+                    if (
+                        canon
+                        and isinstance(sv, (int, float))
+                        and not isinstance(sv, bool)
+                        and 0.0 <= float(sv) <= 100.0
+                    ):
+                        fallback_pct[canon] = max(fallback_pct.get(canon, 0.0), float(sv))
+
+    metrics: dict[str, float] = {}
+    for canonical, hits in sorted(buckets.items()):
+        if hits:
+            covered = sum(1 for cnt in hits.values() if cnt > 0)
+            metrics[canonical] = round(100.0 * covered / len(hits), 2)
+    for canonical, pct in fallback_pct.items():
+        metrics.setdefault(canonical, round(pct, 2))
+    non_total = [v for k, v in metrics.items() if k != "total"]
+    if non_total and "total" not in metrics:
+        metrics["total"] = round(sum(non_total) / len(non_total), 2)
+
+    merged_payload = {
+        "schema": 1,
+        "jobs_merged": len(db_paths),
+        "hits": buckets,
+        "metrics": metrics,
+    }
+    encoded = (json.dumps(merged_payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    provider.transport.put(merged_target, encoded)
+    return f"merged {len(db_paths)} xezim coverage file(s) -> {merged_target}"
+
+
+def _report_xezim_json(
+    provider: Provider,
+    db_target: str,
+    report_dir: str,
+) -> tuple[dict[str, float], str]:
+    if not provider.transport.exists(db_target):
+        raise InfraError(
+            f"merged xezim coverage file not found: {db_target}",
+            code="PROVIDER_FAILED",
+            hint="run 'solouvm cov --merge' first",
+        )
+    raw = _read_optional_file(provider, db_target)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise InfraError(
+            f"invalid merged xezim coverage JSON in {db_target}: {exc}",
+            code="PROVIDER_FAILED",
+        ) from exc
+    if not isinstance(data, Mapping):
+        raise InfraError(
+            f"invalid merged xezim coverage JSON in {db_target}: expected object",
+            code="PROVIDER_FAILED",
+        )
+    metrics: dict[str, float] = {}
+    raw_metrics = data.get("metrics") or data.get("summary")
+    if isinstance(raw_metrics, Mapping):
+        for k, v in raw_metrics.items():
+            canon = _HEADER_ALIAS.get(str(k).lower(), str(k).lower())
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and 0.0 <= float(v) <= 100.0:
+                metrics[canon] = round(float(v), 2)
+    lines = ["Xezim Coverage Summary"]
+    for key in ("total", "line", "branch", "cond", "toggle", "fsm"):
+        if key in metrics:
+            lines.append(f"{key.capitalize()}: {metrics[key]:.2f}%")
+    summary_text = "\n".join(lines) + "\n"
+    _ensure_remote_dir(provider, report_dir)
+    provider.transport.put(
+        posixpath.join(report_dir, "summary.txt"), summary_text.encode("utf-8")
+    )
+    return metrics, summary_text
 
 
 def _parse_table_metrics(lines: Sequence[str]) -> dict[str, float]:
@@ -526,7 +675,8 @@ def cov_merge(
         tool = "imc"
         merged_target = posixpath.join(merged_dir, "merged")
         tcl_path = posixpath.join(merged_dir, "merge.tcl")
-        tcl_body = f"merge -out {merged_target} {' '.join(db_paths)} -overwrite\nexit\n"
+        quoted_dbs = " ".join(_tcl_quote(db) for db in db_paths)
+        tcl_body = f"merge -out {_tcl_quote(merged_target)} {quoted_dbs} -overwrite\nexit\n"
         provider.transport.put(tcl_path, tcl_body.encode("utf-8"))
         argv = ["imc", "-exec", tcl_path]
     elif backend.name == "questa":
@@ -540,11 +690,21 @@ def cov_merge(
             posixpath.join(merged_dir, "merged.dat"),
             *db_paths,
         ]
+    elif backend.name == "xezim":
+        merged_target = posixpath.join(merged_dir, "merged_cov.json")
+        out_msg = _merge_xezim_json(provider, db_paths, merged_target)
+        return {
+            "run_id": plan.run_id,
+            "merged_dir": merged_dir,
+            "job_count": len(db_paths),
+            "tool": "xezim-json",
+            "output": out_msg,
+        }
     else:
         raise ConfigError(
             f"simulator {backend.name!r} has no built-in coverage merge command",
             code="CFG_INVALID",
-            hint="use vcs, xrun, questa, verilator, or configure sim['cov_merge']",
+            hint="use vcs, xrun, questa, verilator, xezim, or configure sim['cov_merge']",
         )
 
     output = _exec_tool(provider, argv, tool=tool)
@@ -603,7 +763,9 @@ def cov_report(
         summary_file = posixpath.join(report_dir, "summary.txt")
         tcl_path = posixpath.join(base_dir, "report.tcl")
         tcl_body = (
-            f"load -run {db_target}\nreport -summary -out {summary_file}\nreport -summary\nexit\n"
+            f"load -run {_tcl_quote(db_target)}\n"
+            f"report -summary -out {_tcl_quote(summary_file)}\n"
+            "report -summary\nexit\n"
         )
         provider.transport.put(tcl_path, tcl_body.encode("utf-8"))
         argv = ["imc", "-exec", tcl_path]
@@ -615,6 +777,16 @@ def cov_report(
         tool = "verilator_coverage"
         _ensure_remote_dir(provider, report_dir)
         argv = ["verilator_coverage", "--annotate", report_dir, db_target]
+    elif backend.name == "xezim":
+        metrics, summary_text = _report_xezim_json(provider, db_target, report_dir)
+        return {
+            "run_id": plan.run_id,
+            "merged_dir": raw_dir,
+            "report_dir": report_dir,
+            "tool": "xezim-json",
+            "metrics": metrics,
+            "output": summary_text,
+        }
     else:
         default_tool = _BUILTIN_COV_TOOLS.get(backend.name)
         raise ConfigError(
@@ -623,7 +795,7 @@ def cov_report(
             hint=(
                 f"use {default_tool} or configure sim['cov_report']"
                 if default_tool
-                else "use vcs, xrun, questa, verilator, or configure sim['cov_report']"
+                else "use vcs, xrun, questa, verilator, xezim, or configure sim['cov_report']"
             ),
         )
 

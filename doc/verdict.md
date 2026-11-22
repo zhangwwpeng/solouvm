@@ -97,7 +97,7 @@
 | Xcelium | `^xmsim: \*E,`、`^xmsim: \*F,`、`^ncsim: \*E,` |
 | Questa | `^\*\* Error`、`^\*\* Fatal` |
 | Verilator | `^%Error`、`Assertion failed` |
-| Icarus | `^ERROR:` |
+| Xezim | `(?i)^error:`、`(?i)^fatal:`、`: error:`、`Assertion failed` |
 
 上表为初始值。不确定：实现前需要用各仿真器的真实日志逐条核对（S-10）。
 

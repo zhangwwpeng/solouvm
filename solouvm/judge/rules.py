@@ -68,6 +68,7 @@ class _Ctx:
     waived: WaiverResult
     expects: list[ExpectResult]
     partial: bool = False
+    stopped_early: bool = False
 
 
 @dataclass
@@ -94,6 +95,7 @@ def decide(
     build_error_line: int | None = None,
     today: date | None = None,
     partial: bool = False,
+    stopped_early: bool = False,
 ) -> Verdict:
     """Apply the fixed rule table (verdict.md §3) and return the raw verdict.
 
@@ -116,6 +118,7 @@ def decide(
             waived=waived,
             expects=apply_expect(list(case.expect), scan),
             partial=partial,
+            stopped_early=stopped_early,
         )
         hit = _first_hit(ctx)
         # 编译失败、没有 facts 等情况下日志并没有被读，首条错误无从谈起
@@ -183,8 +186,11 @@ def _rule_0a(ctx: _Ctx) -> _Hit | None:
 def _rule_0b(ctx: _Ctx) -> _Hit | None:
     if ctx.facts is not None or ctx.facts_error is not None:
         return None
-    status = "skip" if ctx.allow_missing else "error"
-    return _Hit(status, "not run: job.facts missing", "missing")
+    if ctx.allow_missing:
+        return _Hit("skip", "not run: job.facts missing", "missing")
+    if ctx.stopped_early:
+        return _Hit("incomplete", "not run: stopped early", "incomplete")
+    return _Hit("error", "not run: job.facts missing", "missing")
 
 
 def _rule_0c(ctx: _Ctx) -> _Hit | None:

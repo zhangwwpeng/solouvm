@@ -34,6 +34,7 @@ PLACEHOLDERS = frozenset(
         "top",
         "build_dir",
         "simv",
+        "simv_name",
         "seed",
         "job_dir",
         "job_id",
@@ -120,13 +121,18 @@ def _merge_run_opts(
     global_opts: list[str],
     job_opts: list[str],
 ) -> list[str]:
-    """Combine build, global and job run options without duplicating already-merged slices."""
+    """Combine global, build and job run options without duplicating already-merged slices."""
     merged: list[str] = []
-    for source in (build_opts, global_opts):
+    for source in (global_opts, build_opts):
         if source and not _is_subslice(source, job_opts) and not _is_subslice(source, merged):
             merged.extend(source)
     merged.extend(job_opts)
     return merged
+
+
+def _lsf_quote_cmd(inner: str) -> str:
+    """Quote a full ``run_job.sh`` invocation as a single shell word for ``bsub``."""
+    return "'" + inner.replace("'", "'\\''") + "'"
 
 
 def _build_placeholders(
@@ -145,6 +151,7 @@ def _build_placeholders(
         "top": config.top,
         "build_dir": relpath(rel_build_dir, run_dir),
         "simv": relpath(f"{rel_build_dir}/{backend.simv}", run_dir),
+        "simv_name": backend.simv,
     }
 
 
@@ -183,6 +190,7 @@ def _render_build_recipe(
     backend: Backend,
     provider_setup: str,
     run_id: str,
+    lsf_mode: bool = False,
 ) -> list[str]:
     build_cfg = config.builds[mode]
     ctx = _build_placeholders(
@@ -208,8 +216,7 @@ def _render_build_recipe(
     timeout_s = _fmt_seconds(parse_duration(build_cfg.timeout))
     build_job_id = f"build__{mode}__{key}"
 
-    runner_args = [
-        "$(SUBMIT)",
+    job_args = [
         "$(RUN_JOB)",
         "--kind",
         "build",
@@ -226,14 +233,36 @@ def _render_build_recipe(
         timeout_s,
     ]
     if provider_setup:
-        runner_args.extend(["--setup", make_escape(provider_setup, field="provider.setup")])
+        job_args.extend(["--setup", make_escape(provider_setup, field="provider.setup")])
     escaped_cmd = [make_escape(tok, field=f"build[{mode!r}] cmd") for tok in cmd_tokens]
     _ = run_id  # already passed via $(RUN_ID)
+    if lsf_mode:
+        full_inner = f"{' '.join(job_args)} -- {' '.join(escaped_cmd)}"
+        return [
+            f"$(B_{mode})/.ok:",
+            f"\t$(SUBMIT) {_lsf_quote_cmd(full_inner)}",
+        ]
+    runner_args = ["$(SUBMIT)", *job_args]
     return [
         f"$(B_{mode})/.ok:",
         f"\t{' '.join(runner_args)} \\",
         f"\t    -- {' '.join(escaped_cmd)}",
     ]
+
+
+def _extract_mutually_exclusive_script_flag(
+    cmd_tokens: list[str],
+    wave_tokens: list[str],
+) -> tuple[list[str], list[str]]:
+    """Strip ``-do`` or ``-input`` pair from ``cmd_tokens`` when ``wave_tokens`` overrides it."""
+    for flag in ("-do", "-input"):
+        if flag in wave_tokens and flag in cmd_tokens:
+            idx = cmd_tokens.index(flag)
+            if idx + 1 < len(cmd_tokens):
+                default_pair = cmd_tokens[idx : idx + 2]
+                remaining = [*cmd_tokens[:idx], *cmd_tokens[idx + 2 :]]
+                return remaining, default_pair
+    return cmd_tokens, []
 
 
 def _render_job_recipe(
@@ -243,6 +272,7 @@ def _render_job_recipe(
     config: Config,
     backend: Backend,
     provider_setup: str,
+    lsf_mode: bool = False,
 ) -> list[str]:
     build_cfg = config.builds[job.build]
     try_dir = f"{job.dir}/try1"
@@ -290,21 +320,29 @@ def _render_job_recipe(
         if backend.wave
         else []
     )
+    default_script_tokens: list[str] = []
+    if wave_tokens:
+        cmd_tokens, default_script_tokens = _extract_mutually_exclusive_script_flag(
+            cmd_tokens, wave_tokens
+        )
     cmd_tokens = _wrap_shell_tokens(
         cmd_tokens,
         field=f"job {job.job_id!r} cmd",
-        append_args=bool(wave_tokens),
+        append_args=bool(wave_tokens or default_script_tokens),
     )
     escaped_cmd = [make_escape(tok, field=f"job {job.job_id!r} cmd") for tok in cmd_tokens]
     if wave_tokens:
         escaped_wave = " ".join(
             make_escape(tok, field=f"backend {backend.name!r} wave") for tok in wave_tokens
-        )
-        escaped_cmd.append(f"$(if $(filter 1,$(WAVE)),{escaped_wave},)")
+        ).replace(",", "$(COMMA)")
+        escaped_default = " ".join(
+            make_escape(tok, field=f"backend {backend.name!r} run")
+            for tok in default_script_tokens
+        ).replace(",", "$(COMMA)")
+        escaped_cmd.append(f"$(if $(filter 1,$(WAVE)),{escaped_wave},{escaped_default})")
 
     dir_arg = f"{make_escape(job.dir, field=f'job {job.job_id!r} dir')}/try$(TRY)"
-    runner_args = [
-        "$(SUBMIT)",
+    job_args = [
         "$(RUN_JOB)",
         "--kind",
         "job",
@@ -322,15 +360,15 @@ def _render_job_recipe(
         _fmt_seconds(job.timeout_s),
     ]
     if job.hang_s is not None:
-        runner_args.extend(["--hang", _fmt_seconds(job.hang_s)])
+        job_args.extend(["--hang", _fmt_seconds(job.hang_s)])
     if provider_setup:
-        runner_args.extend(["--setup", make_escape(provider_setup, field="provider.setup")])
+        job_args.extend(["--setup", make_escape(provider_setup, field="provider.setup")])
     if config.job.pre:
-        runner_args.extend(["--pre", make_escape(config.job.pre, field="job.pre")])
+        job_args.extend(["--pre", make_escape(config.job.pre, field="job.pre")])
     if config.job.post:
-        runner_args.extend(["--post", make_escape(config.job.post, field="job.post")])
+        job_args.extend(["--post", make_escape(config.job.post, field="job.post")])
     if config.run.mem_limit:
-        runner_args.extend(
+        job_args.extend(
             ["--mem-limit", make_escape(config.run.mem_limit, field="run.mem_limit")]
         )
 
@@ -339,13 +377,20 @@ def _render_job_recipe(
         check_no_newlines(env_key, field=f"env key {env_key!r}")
         if not env_key or "=" in env_key:
             raise ConfigError(f"invalid env key {env_key!r}", code="CFG_INVALID")
-        runner_args.extend(
+        job_args.extend(
             [
                 "--env",
                 make_escape(f"{env_key}={env_val}", field=f"env[{env_key!r}]"),
             ]
         )
 
+    if lsf_mode:
+        full_inner = f"{' '.join(job_args)} -- {' '.join(escaped_cmd)}"
+        return [
+            f"run/{job.job_id}: $(B_{job.build})/.ok",
+            f"\t$(SUBMIT) {_lsf_quote_cmd(full_inner)}",
+        ]
+    runner_args = ["$(SUBMIT)", *job_args]
     return [
         f"run/{job.job_id}: $(B_{job.build})/.ok",
         f"\t{' '.join(runner_args)} \\",
@@ -399,6 +444,13 @@ def render_run_mk(
 
     provider_cfg = config.providers.get(plan.provider) or config.providers.get(config.provider)
     provider_setup = provider_cfg.setup if provider_cfg is not None else ""
+    lsf_mode = provider_cfg is not None and provider_cfg.launcher.kind == "lsf"
+    if lsf_mode and "'" in str(config.root):
+        raise ConfigError(
+            f"project root path cannot contain single quotes with LSF launcher: "
+            f"{str(config.root)!r}",
+            code="CFG_INVALID",
+        )
 
     run_id_make = plan.run_id.replace("$", "$$")
     lines: list[str] = [
@@ -409,8 +461,10 @@ def render_run_mk(
         "SUBMIT  ?=",
         "TRY     ?= 1",
         "WAVE    ?= 0",
-        "",
     ]
+    if "," in (backend.wave or "") or "," in backend.run:
+        lines.append("COMMA   := ,")
+    lines.append("")
 
     build_dirs: dict[str, str] = {}
     for mode in modes:
@@ -441,6 +495,7 @@ def render_run_mk(
                 backend=backend,
                 provider_setup=provider_setup,
                 run_id=plan.run_id,
+                lsf_mode=lsf_mode,
             )
         )
         lines.append("")
@@ -457,6 +512,7 @@ def render_run_mk(
                 config=config,
                 backend=backend,
                 provider_setup=provider_setup,
+                lsf_mode=lsf_mode,
             )
         )
         lines.append("")

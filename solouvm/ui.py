@@ -246,7 +246,8 @@ class LiveRunner:
 
         # Refresh first so Rich clears/updates the viewport cleanly at its current height
         # before printing permanent failure tail lines and the collapsed summary above it.
-        live.refresh()
+        with contextlib.suppress(OSError):
+            live.refresh()
         if not ok and (header is not None or tail):
             if header is not None and _Text is not None:
                 h_idx, h_col, h_detail = header
@@ -258,7 +259,8 @@ class LiveRunner:
                     htxt.append(h_col, style="bold red")
                 if h_detail:
                     htxt.append(f"  {h_detail}")
-                live.console.print(htxt)
+                with contextlib.suppress(OSError):
+                    live.console.print(htxt)
             for p_style, prefix, text in tail:
                 if _Text is not None:
                     ltxt = _Text()
@@ -266,10 +268,13 @@ class LiveRunner:
                     if prefix:
                         ltxt.append(prefix, style=p_style)
                     ltxt.append(text)
-                    live.console.print(ltxt)
+                    with contextlib.suppress(OSError):
+                        live.console.print(ltxt)
                 else:
-                    live.console.print(f"  | {prefix}{text}", markup=False, highlight=False)
-        live.console.print(summary_renderable)
+                    with contextlib.suppress(OSError):
+                        live.console.print(f"  | {prefix}{text}", markup=False, highlight=False)
+        with contextlib.suppress(OSError):
+            live.console.print(summary_renderable)
         return True
 
     def _render_footer(self) -> Any:
@@ -398,7 +403,8 @@ class LiveRunner:
             _state.active_live = prev
         try:
             if live is not None:
-                live.stop()
+                with contextlib.suppress(OSError):
+                    live.stop()
         finally:
             with self._lock:
                 self._live = None

@@ -6,8 +6,17 @@ from pathlib import Path
 
 import pytest
 
-from solouvm.collect import FileEntry, collect_files, load_filelist, parse_dotf
+from solouvm.cli import main
+from solouvm.collect import (
+    FileEntry,
+    collect_files,
+    load_filelist,
+    load_project_filelists,
+    parse_dotf,
+)
+from solouvm.config.load import load_config
 from solouvm.errors import ConfigError
+from solouvm.packages import collect_project_files
 
 
 def touch(root: Path, *names: str) -> None:
@@ -274,3 +283,148 @@ def test_load_filelist(root: Path) -> None:
     write(root / "filelist.py", "raise ValueError('kaput')\n")
     err = raises("CFG_LOAD_FAILED", load_filelist, root)
     assert "kaput" in err.message
+
+
+def test_relative_parent_paths_stay_relative(tmp_path: Path) -> None:
+    rtl_dir = tmp_path / "rtl"
+    dv_dir = tmp_path / "dv"
+    dv_dir.mkdir(parents=True)
+    touch(rtl_dir, "dut.sv", "inc/defs.svh", "cells.v", "sub/inner.sv")
+    write(rtl_dir / "sub.f", "sub/inner.sv\n")
+
+    fl = collect_files(
+        dv_dir,
+        {
+            "rtl": [
+                "+incdir+../rtl/inc",
+                "-v ../rtl/cells.v",
+                "-F ../rtl/sub.f",
+                "../rtl/dut.sv",
+                "/opt/ip/ext.sv",
+            ]
+        },
+    )
+    assert fl.groups["rtl"] == ["../rtl/sub/inner.sv", "../rtl/dut.sv", "/opt/ip/ext.sv"]
+    assert fl.incdirs["rtl"] == ["../rtl/inc"]
+    assert fl.libs["rtl"] == ["-v ../rtl/cells.v"]
+    assert [e.outside_root for e in fl.entries] == [False, False, True]
+
+
+def test_filelist_dirs_sibling_rtl_discovery_and_cli_e2e(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = tmp_path / "repo"
+    rtl_dir = repo / "rtl"
+    dv_dir = repo / "dv"
+    touch(rtl_dir, "pkg/dut_pkg.sv", "dut.sv", "inc/rtl_defs.svh", "cells.v")
+    write(rtl_dir / "rtl.f", "pkg/dut_pkg.sv\n")
+    write(
+        rtl_dir / "filelist.py",
+        (
+            'FILES = {"rtl": ["+incdir+inc", "-v cells.v", "-F rtl.f", "dut.sv"]}\n'
+        ),
+    )
+
+    touch(dv_dir, "verif/env_pkg.sv", "verif/tb_top.sv")
+    write(
+        dv_dir / "solouvm.conf.py",
+        (
+            'CFG = {"simulator": "fake", "top": "tb_top", '
+            '"filelist_dirs": [".", "../rtl/", "../rtl"]}\n'
+        ),
+    )
+    write(
+        dv_dir / "filelist.py",
+        'FILES = {"tb": ["verif/env_pkg.sv"], "top": ["verif/tb_top.sv"]}\n',
+    )
+    write(
+        dv_dir / "case.py",
+        'from solouvm import Case\nCASES = [Case(name="smoke", uvm_test="smoke_test")]\n',
+    )
+
+    cfg = load_config(dv_dir)
+    assert cfg.filelist_dirs == [".", "../rtl", "../rtl"]
+    pfls = load_project_filelists(dv_dir, cfg.filelist_dirs)
+    assert [p.rel_dir for p in pfls] == [".", "../rtl"]
+
+    fl = collect_project_files(cfg)
+    assert fl.groups == {
+        "rtl": ["../rtl/pkg/dut_pkg.sv", "../rtl/dut.sv"],
+        "tb": ["verif/env_pkg.sv"],
+        "top": ["verif/tb_top.sv"],
+    }
+    assert fl.incdirs["rtl"] == ["../rtl/inc"]
+    assert fl.libs["rtl"] == ["-v ../rtl/cells.v"]
+    assert all(not e.outside_root for e in fl.entries)
+    by_path = {e.path: e.source for e in fl.entries}
+    assert by_path["../rtl/pkg/dut_pkg.sv"] == "../rtl/filelist.py:../rtl/rtl.f"
+    assert by_path["../rtl/dut.sv"] == "../rtl/filelist.py:dut.sv"
+
+    # CLI end-to-end: validate -> files -> gen -> regress -> cached regress
+    assert main(["-c", str(dv_dir), "validate"]) == 0
+    _ = capsys.readouterr()
+
+    assert main(["-c", str(dv_dir), "files"]) == 0
+    files_out = capsys.readouterr().out
+    assert "../rtl/dut.sv" in files_out
+    assert "[OUTSIDE ROOT]" not in files_out
+
+    assert main(["-c", str(dv_dir), "gen"]) == 0
+    _ = capsys.readouterr()
+    gen_fl = (dv_dir / ".solouvm" / "gen" / "filelist.f").read_text(encoding="utf-8").splitlines()
+    assert "../rtl/dut.sv" in gen_fl
+    assert "+incdir+../rtl/inc" in gen_fl
+
+    assert main(["-c", str(dv_dir), "regress"]) == 0
+    _ = capsys.readouterr()
+    build_dirs = list((dv_dir / ".solouvm" / "build" / "default").glob("*/filelist.f"))
+    assert len(build_dirs) == 1
+    build_fl = build_dirs[0].read_text(encoding="utf-8").splitlines()
+    assert "../../../../../rtl/dut.sv" in build_fl
+    assert "+incdir+../../../../../rtl/inc" in build_fl
+    assert "-v ../../../../../rtl/cells.v" in build_fl
+    assert "../../../../verif/tb_top.sv" in build_fl
+    assert not any(line.startswith("/") for line in build_fl)
+
+    # Second regress reuses the build key (cache hit)
+    assert main(["-c", str(dv_dir), "--json", "regress"]) == 0
+    events_out = capsys.readouterr().out
+    assert '"event":"build_cached"' in events_out
+    assert len(list((dv_dir / ".solouvm" / "build" / "default").glob("*/filelist.f"))) == 1
+
+    # Omitted dv/filelist.py works when filelist_dirs provides filelist.py
+    (dv_dir / "filelist.py").unlink()
+    write(
+        dv_dir / "solouvm.conf.py",
+        'CFG = {"simulator": "fake", "top": "tb_top", "filelist_dirs": ["../rtl"]}\n',
+    )
+    write(
+        rtl_dir / "filelist.py",
+        (
+            'FILES = {"rtl": ["dut.sv"], "tb": ["../dv/verif/env_pkg.sv"], '
+            '"top": ["../dv/verif/tb_top.sv"]}\n'
+        ),
+    )
+    cfg_no_dv_fl = load_config(dv_dir)
+    fl_no_dv = collect_project_files(cfg_no_dv_fl)
+    assert fl_no_dv.groups == {
+        "rtl": ["../rtl/dut.sv"],
+        "tb": ["verif/env_pkg.sv"],
+        "top": ["verif/tb_top.sv"],
+    }
+
+    # PRIORITY controls ordering across dv/filelist.py and filelist_dirs
+    write(
+        dv_dir / "filelist.py",
+        'PRIORITY = 200\nFILES = {"rtl": ["verif/env_pkg.sv"], "top": ["verif/tb_top.sv"]}\n',
+    )
+    write(rtl_dir / "filelist.py", 'PRIORITY = 50\nFILES = {"rtl": ["dut.sv"]}\n')
+    pfls_prio = load_project_filelists(dv_dir, ["../rtl"])
+    assert [p.rel_dir for p in pfls_prio] == ["../rtl", "."]
+
+    # Missing directory or missing filelist.py raises FILES_MISSING
+    err_dir = raises("FILES_MISSING", load_project_filelists, dv_dir, ["../missing_rtl"])
+    assert "missing_rtl" in err_dir.message
+    (repo / "empty_rtl").mkdir()
+    err_fl = raises("FILES_MISSING", load_project_filelists, dv_dir, ["../empty_rtl"])
+    assert "filelist.py" in err_fl.message

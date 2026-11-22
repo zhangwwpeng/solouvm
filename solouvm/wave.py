@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import posixpath
 import re
+import shlex
 from collections.abc import Iterable, Mapping, Sequence
 from fnmatch import fnmatch
 from typing import TYPE_CHECKING
@@ -186,6 +187,9 @@ def _format_vcd_vector(bits: str, width: int) -> str:
         return lowered
     if set(lowered) <= {"0", "1"}:
         return f"0x{int(lowered, 2):x}"
+    if width > len(lowered) and lowered:
+        pad = lowered[0] if lowered[0] in ("x", "z") else "0"
+        lowered = (pad * (width - len(lowered))) + lowered
     return f"b{lowered}"
 
 
@@ -224,7 +228,8 @@ def _parse_vcd_lines(
 
     current_ticks: int | None = None
     current_values: dict[str, str] = {}
-    last_committed: dict[str, str] | None = None
+    prior_snap: dict[str, str] | None = None
+    last_emitted: dict[str, str] | None = None
     rows: list[dict[str, object]] = []
     truncated = False
     pending_vec: tuple[str, str] | None = None
@@ -266,17 +271,18 @@ def _parse_vcd_lines(
         var_decls.clear()
 
     def commit_tick() -> bool:
-        nonlocal last_committed, truncated
+        nonlocal prior_snap, last_emitted, truncated
         if current_ticks is None:
             return True
         time_ns = round(current_ticks * timescale_ns, 9)
         snap = {sig: current_values.get(sig, "x") for sig in matched_signals}
-        changed = last_committed is None or snap != last_committed
-        last_committed = snap
         if to_ns is not None and time_ns > to_ns:
             return False
         if from_ns is not None and time_ns < from_ns:
+            prior_snap = snap
             return True
+        changed = last_emitted is None or snap != last_emitted
+        last_emitted = snap
         if changes_only and not changed:
             return True
         if limit > 0 and len(rows) >= limit:
@@ -393,6 +399,15 @@ def _parse_vcd_lines(
 
     if not stop and current_ticks is not None:
         commit_tick()
+
+    if not rows and matched_signals and from_ns is not None and prior_snap is not None:
+        rows.append(
+            {
+                "time_ns": from_ns,
+                "time": _format_time_ns(from_ns),
+                "values": dict(prior_snap),
+            }
+        )
 
     return matched_signals, rows, truncated
 
@@ -633,6 +648,50 @@ def _query_converted_vcd(
         _remove_remote_file(provider, tmp_vcd)
 
 
+def _expand_wave_export_cmd(
+    template: object,
+    *,
+    wave_path: str,
+    tmp_vcd: str,
+    signals: Sequence[str],
+    from_ns: float | None,
+    to_ns: float | None,
+) -> list[str]:
+    if isinstance(template, str):
+        try:
+            raw_tokens = shlex.split(template)
+        except ValueError as exc:
+            raise ConfigError(
+                f"sim.wave_export: invalid command syntax {template!r}: {exc}",
+                code="CFG_INVALID",
+            ) from None
+    elif isinstance(template, (list, tuple)) and all(isinstance(t, str) for t in template):
+        raw_tokens = list(template)
+    else:
+        raise ConfigError(
+            f"sim.wave_export must be a string or list of strings, got {template!r}",
+            code="CFG_INVALID",
+        )
+    if not raw_tokens:
+        raise ConfigError("sim.wave_export cannot be empty", code="CFG_INVALID")
+    values = {
+        "wave": wave_path,
+        "wave_file": wave_path,
+        "out": tmp_vcd,
+        "vcd": tmp_vcd,
+        "signals": ",".join(signals),
+        "from": _format_time_ns(from_ns) if from_ns is not None else "",
+        "to": _format_time_ns(to_ns) if to_ns is not None else "",
+    }
+    argv: list[str] = []
+    for tok in raw_tokens:
+        expanded = tok
+        for k, v in values.items():
+            expanded = expanded.replace(f"{{{k}}}", v)
+        argv.append(check_no_newlines(expanded, field="sim.wave_export"))
+    return argv
+
+
 def query_wave(
     *,
     config: Config,
@@ -647,7 +706,6 @@ def query_wave(
     try_num: str | None = None,
 ) -> dict[str, object]:
     """Query signal values from a job's waveform on B within an optional time window (AI-13)."""
-    _ = config
     clean_signals = [s.strip() for s in signals if isinstance(s, str) and s.strip()]
     if not clean_signals:
         raise ConfigError(
@@ -686,8 +744,31 @@ def query_wave(
 
     wave_path = find_waveform(provider, run_id, job_id, try_num=try_num)
     ext = posixpath.splitext(wave_path)[1].lower()
+    custom_export = config.sim.get("wave_export") if hasattr(config, "sim") else None
 
-    if ext == ".vcd":
+    if custom_export is not None and ext != ".vcd":
+        tmp_vcd = f"{wave_path}.solouvm_tmp.vcd"
+        export_argv = _expand_wave_export_cmd(
+            custom_export,
+            wave_path=wave_path,
+            tmp_vcd=tmp_vcd,
+            signals=clean_signals,
+            from_ns=from_ns,
+            to_ns=to_ns,
+        )
+        matched_signals, rows, truncated = _query_converted_vcd(
+            provider=provider,
+            wave_path=wave_path,
+            tool=posixpath.basename(export_argv[0]) or export_argv[0],
+            build_argv=export_argv,
+            tmp_vcd=tmp_vcd,
+            patterns=clean_signals,
+            from_ns=from_ns,
+            to_ns=to_ns,
+            changes_only=changes_only,
+            limit=limit,
+        )
+    elif ext == ".vcd":
         matched_signals, rows, truncated = _parse_vcd_lines(
             provider.transport.read_lines(wave_path),
             patterns=clean_signals,

@@ -101,7 +101,7 @@ PYTHONPATH=/path/to/solouvm python3 -m solouvm --version
 | `slang` | `solouvm check` 第一阶段快速静态语法检查 | 未实机验证（[requirements.md §26](../requirements.md#26-不确定事项)） |
 | `rsync` / `git` | 跨机文件同步（`sync.kind = "rsync" \| "git"`） | 同机或共享盘可用 `sync.kind = "none"` |
 | `bsub` / `bkill` / `bjobs` | LSF 集群作业调度（`launcher.kind = "lsf"`） | 参数见各站点环境 |
-| `vcs` / `xrun` / `questa` / `iverilog` / `verilator` | RTL/UVM 仿真与覆盖率（`urg`/`imc`/`vcover`）与波形导出（`fsdb2vcd`/`wlf2vcd`） | 本仓库仅用内置 `fake` 完整跑通，实机工具细节见 `§26` |
+| `vcs` / `xrun` / `questa` / `xezim` / `verilator` | RTL/UVM 仿真与覆盖率（`urg`/`imc`/`vcover`）与波形导出（`fsdb2vcd`/`wlf2vcd`） | 本仓库仅用内置 `fake` 完整跑通，实机工具细节见 `§26` |
 
 ## 4. 环境自检（`solouvm doctor`）
 

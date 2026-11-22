@@ -286,7 +286,7 @@
 | S-01 | 内置 VCS 后端 | P0 | |
 | S-02 | 内置 Xcelium（xrun）后端 | P0 | |
 | S-03 | 内置 Questa 后端 | P1 | |
-| S-04 | 内置 Icarus Verilog 后端 | P1 | 无 UVM，便于开源环境演示 |
+| S-04 | 内置 Xezim 后端 | P1 | 开源 Rust SystemVerilog/UVM 仿真器（https://github.com/aionhw/xezim） |
 | S-05 | 内置 Verilator 后端 | P2 | |
 | S-06 | 内置假仿真器后端，用于 solouvm 自测与示例，不需要 EDA 工具 | P0 | |
 | S-07 | 自定义后端：在 `CFG["sim"]` 中给出编译、运行、种子、波形、覆盖率等命令模板 | P0 | |

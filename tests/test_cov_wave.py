@@ -533,7 +533,7 @@ def test_find_waveform_latest_try_explicit_try_and_missing(tmp_path: Path) -> No
 
 def test_query_wave_vcd_multiscope_globs_window_changes_and_limit(tmp_path: Path) -> None:
     proj = tmp_path / "proj_vcd"
-    cfg = _make_config(proj, simulator="iverilog")
+    cfg = _make_config(proj, simulator="xezim")
     prov = get_provider(cfg)
     run_id = "20261118-120000-vcd"
     job_id = "burst__4417"
@@ -871,7 +871,7 @@ def test_wave_and_cov_local_transport_smoke(tmp_path: Path) -> None:
 
 def test_query_wave_vcd_memory_arrays_and_split_slices(tmp_path: Path) -> None:
     proj = tmp_path / "proj_mem"
-    cfg = _make_config(proj, simulator="iverilog")
+    cfg = _make_config(proj, simulator="xezim")
     prov = Provider(
         name="local",
         transport=LocalTransport(root=proj),

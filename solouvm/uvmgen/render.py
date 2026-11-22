@@ -161,21 +161,41 @@ def _render_template(
     return finalize_checksum(rendered)
 
 
+_SV_PARAM_TYPE_PREFIXES = (
+    "int ",
+    "integer ",
+    "type ",
+    "bit ",
+    "logic ",
+    "reg ",
+    "byte ",
+    "shortint ",
+    "longint ",
+    "real ",
+    "shortreal ",
+    "string ",
+    "time ",
+)
+
+
+def _format_interface_param(raw_param: str) -> str:
+    stripped = raw_param.strip()
+    if stripped.startswith("parameter "):
+        return f"  {stripped}"
+    if stripped.startswith(_SV_PARAM_TYPE_PREFIXES) or stripped.startswith(("bit[", "logic[")):
+        return f"  parameter {stripped}"
+    if "=" in stripped:
+        return f"  parameter int {stripped}"
+    return f"  parameter int {stripped} = 0"
+
+
 def _render_interface(
     iface: Interface,
     roles_on_iface: set[str],
     templates_dir: Path | None,
 ) -> str:
     if iface.params:
-        formatted = []
-        for param in iface.params:
-            stripped = param.strip()
-            if stripped.startswith("parameter "):
-                formatted.append(f"  {stripped}")
-            elif "=" in stripped:
-                formatted.append(f"  parameter int {stripped}")
-            else:
-                formatted.append(f"  parameter int {stripped} = 0")
+        formatted = [_format_interface_param(param) for param in iface.params]
         params_decl = "#(\n" + ",\n".join(formatted) + "\n) "
     else:
         params_decl = ""
@@ -184,8 +204,12 @@ def _render_interface(
     for sig in iface.signals:
         if sig.width == 1:
             sig_lines.append(f"  logic {sig.name};")
-        else:
+        elif isinstance(sig.width, int):
             sig_lines.append(f"  logic [{sig.width - 1}:0] {sig.name};")
+        elif sig.width.isidentifier():
+            sig_lines.append(f"  logic [{sig.width}-1:0] {sig.name};")
+        else:
+            sig_lines.append(f"  logic [({sig.width})-1:0] {sig.name};")
     signal_decls = "\n".join(sig_lines) + ("\n" if sig_lines else "")
 
     rst_name = iface.reset[0]

@@ -119,6 +119,7 @@ def test_defaults_match_doc_table() -> None:
     assert DEFAULTS["builds"] == {"default": {}}
     assert DEFAULTS["simulator"] is None
     assert DEFAULTS["top"] is None
+    assert DEFAULTS["filelist_dirs"] == []
 
 
 def test_configs_do_not_share_lists(project: Path) -> None:
@@ -482,3 +483,20 @@ def test_a_side_unset_var_errors(project: Path, monkeypatch: pytest.MonkeyPatch)
     err = raises("CFG_INVALID", load_config, project)
     assert "NOPE" in err.message
     assert "providers.farm.transport.host" in err.message
+
+
+def test_filelist_dirs_normalizes_relative_and_rejects_absolute(project: Path) -> None:
+    conf(
+        project,
+        'CFG = {"simulator": "fake", "top": "t", "filelist_dirs": ["./", "../rtl/", "extra/fl"]}\n',
+    )
+    cfg = load_config(project)
+    assert cfg.filelist_dirs == [".", "../rtl", "extra/fl"]
+
+    conf(project, 'CFG = {"simulator": "fake", "top": "t", "filelist_dirs": ["/abs/rtl"]}\n')
+    err = raises("CFG_INVALID", load_config, project)
+    assert "filelist_dirs" in err.message
+    assert "relative" in err.message
+
+    conf(project, 'CFG = {"simulator": "fake", "top": "t", "filelist_dirs": [""]}\n')
+    raises("CFG_INVALID", load_config, project)

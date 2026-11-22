@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from solouvm.backends import fake_sim_source
+from solouvm.buildkey import strip_sv_comments
 from solouvm.check.slang import (
     CHECK_REL_DIR,
     CheckDiagnostic,
@@ -27,6 +28,7 @@ from solouvm.gen.makefile import expand_template
 from solouvm.gen.scripts import render_run_job
 from solouvm.gen.shell import check_no_newlines, relpath, sh_quote
 from solouvm.judge.facts import FactsError, parse_facts
+from solouvm.packages import package_sync_files
 from solouvm.providers.base import log_command
 
 if TYPE_CHECKING:
@@ -52,7 +54,6 @@ HIER_REF_HINT = (
 )
 
 _PACKAGE_RE = re.compile(r"^\s*package\s+(?:automatic\s+|static\s+)?(\w+)\s*;", re.MULTILINE)
-_COMMENT_RE = re.compile(r"//[^\n]*|/\*.*?\*/", re.DOTALL)
 _SHELL_OPS = frozenset({"&&", "||", ";", "|"})
 
 _VERILATOR_DIAG_RE = re.compile(
@@ -98,11 +99,7 @@ class FakeTopResult:
 
 
 def _strip_sv_comments(text: str) -> str:
-    def repl(match: re.Match[str]) -> str:
-        raw = match.group(0)
-        return re.sub(r"[^\n]", " ", raw)
-
-    return _COMMENT_RE.sub(repl, text)
+    return strip_sv_comments(text, blank_strings=True)
 
 
 def extract_tb_packages(root: Path, tb_files: list[str]) -> list[str]:
@@ -153,12 +150,21 @@ def write_tb_filelist(config: Config, files: FileList) -> Path:
     check_dir = root / CHECK_REL_DIR
     check_dir.mkdir(parents=True, exist_ok=True)
 
+    default_build = config.builds.get("default")
     outside_map = {entry.path: entry.outside_root for entry in files.entries}
     raw_lines: list[str] = []
-    for define in [*config.defines, *files.defines.get("tb", [])]:
+    for define in [
+        *config.defines,
+        *(default_build.defines if default_build else []),
+        *files.defines.get("tb", []),
+    ]:
         check_no_newlines(define, field="defines")
         raw_lines.append(f"+define+{define}")
-    for incdir in [*config.incdirs, *files.incdirs.get("tb", [])]:
+    for incdir in [
+        *config.incdirs,
+        *(default_build.incdirs if default_build else []),
+        *files.incdirs.get("tb", []),
+    ]:
         formatted = format_check_path(root, resolved_root, incdir, expand_local=False)
         raw_lines.append(f"+incdir+{formatted}")
     for lib in files.libs.get("tb", []):
@@ -193,24 +199,27 @@ def write_tb_filelist(config: Config, files: FileList) -> Path:
     return dotf_path
 
 
+def _write_executable_if_changed(path: Path, content: str) -> None:
+    try:
+        if path.is_file() and path.read_text(encoding="utf-8") == content:
+            return
+    except OSError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    path.chmod(0o755)
+
+
 def ensure_check_scripts(root: Path, backend: Backend) -> list[str]:
-    """Ensure ``.solouvm/gen/bin/run_job.sh`` (and ``fake_sim.sh`` if needed) exist."""
+    """Ensure ``.solouvm/gen/bin/run_job.sh`` (and ``fake_sim.sh`` if needed) are up to date."""
     written: list[str] = []
     run_job_rel = ".solouvm/gen/bin/run_job.sh"
-    run_job_path = root / run_job_rel
-    if not run_job_path.exists():
-        run_job_path.parent.mkdir(parents=True, exist_ok=True)
-        run_job_path.write_text(render_run_job(), encoding="utf-8")
-        run_job_path.chmod(0o755)
+    _write_executable_if_changed(root / run_job_rel, render_run_job())
     written.append(run_job_rel)
 
     if backend.name == "fake" or "fake_sim.sh" in backend.compile_only:
         fake_rel = ".solouvm/gen/bin/fake_sim.sh"
-        fake_path = root / fake_rel
-        if not fake_path.exists():
-            fake_path.parent.mkdir(parents=True, exist_ok=True)
-            fake_path.write_text(fake_sim_source(), encoding="utf-8")
-            fake_path.chmod(0o755)
+        _write_executable_if_changed(root / fake_rel, fake_sim_source())
         written.append(fake_rel)
     return written
 
@@ -234,6 +243,7 @@ def expand_compile_only_cmd(backend: Backend, config: Config) -> tuple[list[str]
         "top": config.top,
         "build_dir": ".",
         "simv": backend.simv,
+        "simv_name": backend.simv,
     }
     try:
         raw_tokens = shlex.split(template)
@@ -564,11 +574,14 @@ def run_faketop(
     script_files = ensure_check_scripts(root, backend)
     cmd_tokens, primary_bin = expand_compile_only_cmd(backend, config)
 
-    push_files = [
-        *script_files,
-        f"{CHECK_REL_DIR}/fake_top.sv",
-        f"{CHECK_REL_DIR}/filelist.tb.f",
-    ]
+    push_files = sorted(
+        {
+            *script_files,
+            f"{CHECK_REL_DIR}/fake_top.sv",
+            f"{CHECK_REL_DIR}/filelist.tb.f",
+            *package_sync_files(root, config),
+        }
+    )
     rc, log_text, duration_s = run_check_job(
         root=root,
         provider=provider,

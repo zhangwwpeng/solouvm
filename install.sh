@@ -197,6 +197,20 @@ if [ "$uninstall" -eq 1 ]; then
         echo "Removed $BASH_COMP_PATH"
         removed=1
     fi
+    if [ "$mode" = "user" ]; then
+        for py_cand in python3 python3.13 python3.12 python3.11 python3.10; do
+            if command -v "$py_cand" >/dev/null 2>&1; then
+                user_site="$("$py_cand" -c 'import site; print(site.getusersitepackages())' 2>/dev/null || true)"
+                if [ -n "$user_site" ] && [ -f "$user_site/solouvm.pth" ]; then
+                    if grep -Fx "$INSTALL_LIB" "$user_site/solouvm.pth" >/dev/null 2>&1; then
+                        rm -f "$user_site/solouvm.pth"
+                        echo "Removed $user_site/solouvm.pth"
+                        removed=1
+                    fi
+                fi
+            fi
+        done
+    fi
     if [ "$removed" -eq 0 ]; then
         echo "solouvm is not installed under $prefix"
     else
@@ -466,6 +480,15 @@ mv "$ZSH_COMP_TMP" "$ZSH_COMP_PATH"
 ZSH_COMP_TMP=""
 mv "$BASH_COMP_TMP" "$BASH_COMP_PATH"
 BASH_COMP_TMP=""
+
+if [ "$mode" = "user" ]; then
+    USER_SITE="$("$PYTHON_BIN" -c 'import site; print(site.getusersitepackages())' 2>/dev/null || true)"
+    if [ -n "$USER_SITE" ] && is_under_home "$USER_SITE"; then
+        if mkdir -p "$USER_SITE" 2>/dev/null && [ -w "$USER_SITE" ]; then
+            printf '%s\n' "$INSTALL_LIB" >"$USER_SITE/solouvm.pth"
+        fi
+    fi
+fi
 
 if [ "$mode" = "system" ]; then
     chmod a+rX "$LIB_PARENT" "$INSTALL_BIN" "$prefix/share" "$prefix/share/zsh" "$ZSH_COMP_DIR" "$prefix/share/bash-completion" "$BASH_COMP_DIR" 2>/dev/null || true

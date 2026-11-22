@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from solouvm.collect.cases import collect_cases
 from solouvm.errors import ConfigError
-from solouvm.model import Bug, Case, Log, Note, Todo
+from solouvm.model import Bug, Case, Log, Note, Todo, Triage
 from solouvm.ui import format_table
 
 if TYPE_CHECKING:
@@ -18,7 +18,8 @@ if TYPE_CHECKING:
 
 __all__ = ["format_notes_table", "next_bug_id", "query_notes"]
 
-VALID_NOTE_TYPES: frozenset[str] = frozenset({"bug", "todo", "log", "note"})
+VALID_NOTE_TYPES: frozenset[str] = frozenset({"bug", "todo", "log", "note", "triage"})
+_UNASSIGNED_TOKENS: frozenset[str] = frozenset({"unassigned", "none", "-"})
 _UNRESOLVED_BUG_STATUSES: frozenset[str] = frozenset({"open", "fixed"})
 
 
@@ -69,6 +70,8 @@ def _record_date_str(record: object) -> str | None:
         return record.date or (
             record.at[:10] if isinstance(record.at, str) and len(record.at) >= 10 else None
         )
+    if isinstance(record, Triage):
+        return record.at[:10] if isinstance(record.at, str) and len(record.at) >= 10 else None
     return None
 
 
@@ -152,6 +155,8 @@ def query_notes(
                 rec_type = "log"
             elif isinstance(record, Note):
                 rec_type = "note"
+            elif isinstance(record, Triage):
+                rec_type = "triage"
             else:
                 continue
 
@@ -164,7 +169,7 @@ def query_notes(
                 if rec_type not in types_set:
                     continue
             elif statuses_set:
-                if "all" not in statuses_set and rec_type in ("log", "note"):
+                if "all" not in statuses_set and rec_type in ("log", "note", "triage"):
                     continue
             elif rec_type not in ("bug", "todo"):
                 continue
@@ -192,6 +197,14 @@ def query_notes(
                         continue
                 elif record.done:
                     continue
+            elif isinstance(record, Triage) and statuses_set and "all" not in statuses_set:
+                rev_state = (
+                    str(record.review.get("decision", "pending"))
+                    if isinstance(record.review, dict)
+                    else "pending"
+                )
+                if record.verdict not in statuses_set and rev_state not in statuses_set:
+                    continue
 
             eff_owner: str | None
             if isinstance(record, (Bug, Todo)):
@@ -199,8 +212,14 @@ def query_notes(
             else:
                 eff_owner = case.owner
 
-            if owner_set and (eff_owner is None or eff_owner not in owner_set):
-                continue
+            if owner_set:
+                want_unassigned = bool(owner_set & _UNASSIGNED_TOKENS)
+                named_owners = owner_set - _UNASSIGNED_TOKENS
+                if eff_owner is None:
+                    if not want_unassigned:
+                        continue
+                elif eff_owner not in named_owners:
+                    continue
 
             rec_date_str = _record_date_str(record)
             if since_dt is not None or until_dt is not None:
@@ -296,6 +315,31 @@ def query_notes(
                         "due": None,
                         "done": None,
                         "link": None,
+                        "signature": None,
+                        "author": record.author,
+                        "at": record.at,
+                    }
+                )
+            elif isinstance(record, Triage):
+                rev = (
+                    str(record.review.get("decision", "pending"))
+                    if isinstance(record.review, dict)
+                    else "pending"
+                )
+                rows.append(
+                    {
+                        "id": f"{case.name}@{record.task}",
+                        "record_id": None,
+                        "case": case.name,
+                        "type": "triage",
+                        "status": f"{record.verdict} ({rev})",
+                        "owner": eff_owner,
+                        "seed": None,
+                        "title": record.summary,
+                        "date": rec_date_str,
+                        "due": None,
+                        "done": None,
+                        "link": record.doc,
                         "signature": None,
                         "author": record.author,
                         "at": record.at,

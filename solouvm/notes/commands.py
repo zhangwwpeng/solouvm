@@ -336,14 +336,18 @@ def bug_update(
         new_found = bug.found or today_str
         new_fixed = bug.fixed
         new_verified = bug.verified
-        if status == "fixed":
+        if status == "open":
+            new_fixed = None
+            new_verified = None
+        elif status == "fixed":
             new_fixed = new_fixed or today_str
+            new_verified = None
         elif status == "verified":
             new_fixed = new_fixed or today_str
             new_verified = new_verified or today_str
 
-        new_owner = owner if owner is not None else bug.owner
-        new_link = link if link is not None else bug.link
+        new_owner = (owner if owner != "" else None) if owner is not None else bug.owner
+        new_link = (link if link != "" else None) if link is not None else bug.link
         new_body = bug.body
         if extra_body is not None and extra_body:
             new_body = f"{bug.body.rstrip()}\n{extra_body}" if bug.body.strip() else extra_body

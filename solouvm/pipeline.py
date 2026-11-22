@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import time
 from collections.abc import Callable, Iterator, Sequence
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from solouvm import __version__, hooks, output, ui
-from solouvm.backends import fake_sim_source, get_backend
+from solouvm.backends import fake_sim_source, resolve_sim_backend
 from solouvm.buildkey import compute_build_keys
 from solouvm.collect import collect_cases
 from solouvm.errors import BuildError, ConfigError, InfraError
@@ -69,25 +70,71 @@ __all__ = [
 
 _SOLOUVM_VERSION = __version__
 _SAFE_RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z", re.ASCII)
-_REGEX_LIST_FIELDS = ("error_regex", "license_regex")
 
 
 def _backend_for(config: Config) -> Backend:
-    overrides = {
-        k: (
-            shlex.join(v)
-            if isinstance(v, list)
-            and k not in _REGEX_LIST_FIELDS
-            and all(isinstance(x, str) for x in v)
-            else v
-        )
-        for k, v in config.sim.items()
-    }
-    return get_backend(config.simulator, overrides)
+    return resolve_sim_backend(config.simulator, config.sim)
 
 
-def _now_iso() -> str:
-    return datetime.now().astimezone().isoformat(timespec="seconds")
+def _local_hostnames() -> set[str]:
+    try:
+        full = socket.gethostname()
+    except OSError:
+        return set()
+    short = full.split(".", 1)[0]
+    return {full, short} - {""}
+
+
+def _preview_gen(
+    *,
+    config: Config,
+    plan: Plan,
+    files: FileList,
+    provider: Provider,
+    rebuild: bool = False,
+    solouvm_version: str = _SOLOUVM_VERSION,
+) -> list[str]:
+    """Compute build keys and expected push manifest in memory without writing files."""
+    root = Path(config.root)
+    backend = _backend_for(config)
+    plan.provider = provider.name
+    eff_sim_version: str | None = None
+    if backend.name == "fake":
+        eff_sim_version = "FAKE-SIM 1.0"
+    elif type(provider.transport) is LocalTransport:
+        eff_sim_version = detect_sim_version(backend, provider, root)
+
+    used_modes = sorted({job.build for job in plan.jobs} or set(plan.builds))
+    bk = compute_build_keys(
+        config=config,
+        files=files,
+        backend=backend,
+        modes=used_modes,
+        run_id=plan.run_id,
+        sim_version=eff_sim_version,
+        solouvm_version=solouvm_version,
+        provider=provider.name,
+        provider_setup=provider.setup,
+        save_cache=False,
+    )
+    build_keys = dict(bk.keys)
+    if rebuild:
+        build_keys = _apply_rebuild_salt(build_keys, run_id=plan.run_id, modes=used_modes)
+    plan.builds = build_keys
+
+    group_files = ("filelist.f", "filelist.rtl.f", "filelist.tb.f", "filelist.top.f")
+    manifest = [
+        ".solouvm/Makefile",
+        ".solouvm/gen/bin/fake_sim.sh",
+        ".solouvm/gen/bin/launch.sh",
+        ".solouvm/gen/bin/run_job.sh",
+        f".solouvm/runs/{plan.run_id}/run.mk",
+        *(f".solouvm/gen/{gf}" for gf in group_files),
+    ]
+    for mode, key in sorted(build_keys.items()):
+        manifest.extend(f".solouvm/build/{mode}/{key}/{gf}" for gf in group_files)
+    manifest.extend(package_sync_files(root, config))
+    return sorted(set(manifest))
 
 
 def make_run_id(
@@ -966,15 +1013,13 @@ def build(
 
     if dry_run:
         if not _skip_gen:
-            gen_res = gen(
+            manifest = _preview_gen(
                 config=config,
                 plan=plan,
                 files=eff_files,
                 provider=provider,
                 rebuild=rebuild,
-                _run_hooks=False,
             )
-            manifest = list(gen_res["manifest"])  # type: ignore[arg-type]
         else:
             manifest = _gen_manifest(root, plan.run_id, plan.builds, config=config)
         for m in selected_modes:
@@ -1538,20 +1583,45 @@ def _stop_b_processes(*, config: Config, provider: Provider, run_id: str) -> Non
     with contextlib.suppress(Exception):
         provider.launcher.stop(provider.transport, run_id)
 
+    done_rel = f".solouvm/runs/{run_id}/launch.done"
     pid_rel = f".solouvm/runs/{run_id}/launch.pid"
     with contextlib.suppress(Exception):
-        if not provider.transport.exists(pid_rel):
+        if provider.transport.exists(done_rel) or not provider.transport.exists(pid_rel):
             return
         content = _read_remote_or_local(provider, pid_rel).strip()
         parts = content.split()
         if len(parts) < 2 or not parts[1].isdigit():
             return
-        pgid = int(parts[1])
-        killer = getattr(provider.transport, "stop_pgid", None)
-        if callable(killer):
-            killer(pgid)
+        host, pgid = parts[0], int(parts[1])
+        if pgid <= 1:
+            return
+        if type(provider.transport) is LocalTransport:
+            local_hosts = _local_hostnames()
+            if local_hosts and host not in local_hosts:
+                return
+            killer = getattr(provider.transport, "stop_pgid", None)
+            if callable(killer):
+                killer(pgid)
+            else:
+                with contextlib.suppress(OSError):
+                    os.killpg(pgid, 15)
         else:
-            provider.transport.exec(["kill", "-TERM", f"-{pgid}"], cwd=".", check=False)
+            provider.transport.exec(
+                [
+                    "sh",
+                    "-c",
+                    'h=$(hostname -s 2>/dev/null || hostname); '
+                    'full=$(hostname 2>/dev/null || echo "$h"); '
+                    'if [ "$1" = "$h" ] || [ "$1" = "$full" ]; then '
+                    'kill -TERM "-$2" 2>/dev/null || true; '
+                    "fi",
+                    "_",
+                    host,
+                    str(pgid),
+                ],
+                cwd=".",
+                check=False,
+            )
 
 
 def _retry_candidates(
@@ -1667,6 +1737,7 @@ def _run_stage_followup(
         provider=provider,
         allow_missing=allow_missing,
         partial=False,
+        run_finished=True,
     )
     attempt = 1
     while True:
@@ -1706,8 +1777,10 @@ def _run_stage_followup(
             config=config,
             plan=plan,
             provider=provider,
-            allow_missing=allow_missing or stopped_early,
+            allow_missing=allow_missing,
             partial=stopped_early,
+            stopped_early=stopped_early,
+            run_finished=not stopped_early,
         )
         if retry_stopped:
             return True
@@ -1790,15 +1863,13 @@ def run_regression(
     ]
 
     if dry_run:
-        gen_res = gen(
+        manifest = _preview_gen(
             config=config,
             plan=plan,
             files=files,
             provider=provider,
             rebuild=rebuild,
-            _run_hooks=False,
         )
-        manifest = list(gen_res["manifest"])  # type: ignore[arg-type]
         dry_payload = {
             "run_id": plan.run_id,
             "dry_run": True,
@@ -1818,6 +1889,7 @@ def run_regression(
             total_stages=3,
             emit_json_events=True,
         )
+        det_stopped = False
         with _pipeline_stage(
             "run",
             "submitting in background",
@@ -1838,7 +1910,7 @@ def run_regression(
                 extra={"detach": True},
                 emit_json_events=True,
             )
-            _launch_make(
+            det_stopped = _launch_make(
                 config=config,
                 plan=plan,
                 provider=provider,
@@ -1850,8 +1922,24 @@ def run_regression(
                 deadline=deadline,
                 budget_label=eff_budget,
             )
-            st_run["detail"] = "submitted in background"
-        return [], None, 0
+            hooks.run_hook(
+                phase="post",
+                stage="run",
+                root=root,
+                config=config,
+                plan=plan,
+                provider=provider,
+                run_id=plan.run_id,
+                files=files,
+                extra={"detach": True, "stopped_early": det_stopped},
+                emit_json_events=True,
+            )
+            if det_stopped:
+                st_run["detail"] = "stopped (budget exceeded)"
+                st_run["ok"] = False
+            else:
+                st_run["detail"] = "submitted in background"
+        return [], None, 1 if det_stopped else 0
 
     eff_verbose = max(verbose, ui.verbosity())
     stream_logs = (ui.is_tty() or eff_verbose >= 1) and not ui.is_json_mode() and not ui.is_quiet()
@@ -1919,24 +2007,25 @@ def run_regression(
                     ok_modes[mode] = bool(
                         key and provider.transport.exists(f".solouvm/build/{mode}/{key}/.ok")
                     )
+                hooks.run_hook(
+                    phase="post",
+                    stage="build",
+                    root=root,
+                    config=config,
+                    plan=plan,
+                    provider=provider,
+                    run_id=plan.run_id,
+                    files=files,
+                    extra={
+                        "build_rc": build_rc,
+                        "modes": mon_modes,
+                        "ok_modes": ok_modes,
+                        "all_cached": all_cached,
+                        "stopped_early": build_stopped,
+                    },
+                    emit_json_events=True,
+                )
                 if not build_stopped:
-                    hooks.run_hook(
-                        phase="post",
-                        stage="build",
-                        root=root,
-                        config=config,
-                        plan=plan,
-                        provider=provider,
-                        run_id=plan.run_id,
-                        files=files,
-                        extra={
-                            "build_rc": build_rc,
-                            "modes": mon_modes,
-                            "ok_modes": ok_modes,
-                            "all_cached": all_cached,
-                        },
-                        emit_json_events=True,
-                    )
                     if all_cached:
                         st_build["detail"] = f"cached {modes_label} (reused)"
                     elif build_rc == 0:
@@ -1970,6 +2059,12 @@ def run_regression(
                                 provider,
                                 root,
                                 f".solouvm/runs/{plan.run_id}/launch.pid",
+                                local_only=False,
+                            )
+                            _rm_path(
+                                provider,
+                                root,
+                                f".solouvm/runs/{plan.run_id}/launch.done",
                                 local_only=False,
                             )
                         hooks.run_hook(
@@ -2019,19 +2114,19 @@ def run_regression(
                                 eff_budget=eff_budget,
                                 verbose=verbose,
                             )
+                        hooks.run_hook(
+                            phase="post",
+                            stage="run",
+                            root=root,
+                            config=config,
+                            plan=plan,
+                            provider=provider,
+                            run_id=plan.run_id,
+                            files=files,
+                            extra={"stopped_early": stopped_early},
+                            emit_json_events=True,
+                        )
                         if not stopped_early:
-                            hooks.run_hook(
-                                phase="post",
-                                stage="run",
-                                root=root,
-                                config=config,
-                                plan=plan,
-                                provider=provider,
-                                run_id=plan.run_id,
-                                files=files,
-                                extra={"stopped_early": stopped_early},
-                                emit_json_events=True,
-                            )
                             st_run["detail"] = f"finished {run_desc} (j={n_jobs})"
                         else:
                             st_run["detail"] = "stopped early"
@@ -2060,8 +2155,10 @@ def run_regression(
                     config=config,
                     plan=plan,
                     provider=provider,
-                    allow_missing=allow_missing or stopped_early,
+                    allow_missing=allow_missing,
                     partial=stopped_early,
+                    stopped_early=stopped_early,
+                    run_finished=not stopped_early,
                 )
                 payload = write_results(
                     run_dir(root, plan.run_id),
@@ -2072,6 +2169,8 @@ def run_regression(
                     config=config,
                 )
                 exit_code = judge_exit_code(results)
+                if stopped_early and exit_code == 0:
+                    exit_code = 1
                 hooks.run_hook(
                     phase="post",
                     stage="judge",
@@ -2096,7 +2195,8 @@ def run_regression(
             plan=plan,
             provider=provider,
             partial=True,
-            allow_missing=True,
+            allow_missing=allow_missing,
+            stopped_early=True,
         )
         payload = write_results(
             run_dir(root, plan.run_id),
@@ -2340,7 +2440,7 @@ def rerun(
 ) -> tuple[Plan, list[Result], dict[str, object] | None, int]:
     """Build a seed-preserving rerun plan (or ``--note CASE#ID``) and run it (R-02, M-12)."""
     root = Path(config.root)
-    new_run_id = make_run_id(root, reserve=True)
+    new_run_id = make_run_id(root, reserve=not dry_run)
     try:
         if note_ref is not None:
             new_plan = _build_rerun_note_plan(
@@ -2375,29 +2475,49 @@ def rerun(
             verbose=verbose,
         )
     except BaseException:
-        with contextlib.suppress(OSError):
-            run_dir(root, new_run_id).rmdir()
+        if not dry_run:
+            with contextlib.suppress(OSError):
+                run_dir(root, new_run_id).rmdir()
         raise
     return new_plan, results, payload, code
 
 
 def _launch_pid_alive(provider: Provider, run_id: str) -> bool:
+    done_rel = f".solouvm/runs/{run_id}/launch.done"
     pid_rel = f".solouvm/runs/{run_id}/launch.pid"
-    if not provider.transport.exists(pid_rel):
+    if provider.transport.exists(done_rel) or not provider.transport.exists(pid_rel):
         return False
     text = _read_remote_or_local(provider, pid_rel).strip()
     parts = text.split()
     if len(parts) < 2 or not parts[1].isdigit():
         return False
-    _host, pgid = parts[0], int(parts[1])
+    host, pgid = parts[0], int(parts[1])
+    if pgid <= 1:
+        return False
     if type(provider.transport) is LocalTransport:
+        local_hosts = _local_hostnames()
+        if local_hosts and host not in local_hosts:
+            return False
         try:
             os.killpg(pgid, 0)
         except OSError:
             return False
         else:
             return True
-    rc = provider.transport.exec(["kill", "-0", f"-{pgid}"], cwd=".", check=False)
+    rc = provider.transport.exec(
+        [
+            "sh",
+            "-c",
+            'h=$(hostname -s 2>/dev/null || hostname); '
+            'full=$(hostname 2>/dev/null || echo "$h"); '
+            '( [ "$1" = "$h" ] || [ "$1" = "$full" ] ) && kill -0 "-$2"',
+            "_",
+            host,
+            str(pgid),
+        ],
+        cwd=".",
+        check=False,
+    )
     return rc == 0
 
 
@@ -2418,8 +2538,9 @@ def status_run(
         raw_facts = provider.transport.read_many(f".solouvm/runs/{actual_run_id}/*/try*/job.facts")
         facts_map = _parse_facts_map(raw_facts, run_id=actual_run_id)
         summary = _live_summary(plan, facts_map)
-        alive = _launch_pid_alive(provider, actual_run_id)
-        running_flag = alive or int(summary["running"]) > 0  # type: ignore[arg-type]
+        done_exists = provider.transport.exists(f".solouvm/runs/{actual_run_id}/launch.done")
+        alive = False if done_exists else _launch_pid_alive(provider, actual_run_id)
+        running_flag = alive or (not done_exists and int(summary["running"]) > 0)  # type: ignore[arg-type]
         return {
             "run_id": actual_run_id,
             "active": running_flag,
@@ -2481,6 +2602,8 @@ def _active_runs(
             continue
         rid = entry.name
         eff_prov = _provider_for_plan(config, provider, entry) if use_plan_provider else provider
+        if eff_prov.transport.exists(f".solouvm/runs/{rid}/launch.done"):
+            continue
         raw_facts = eff_prov.transport.read_many(f".solouvm/runs/{rid}/*/try*/job.facts")
         facts_map = _parse_facts_map(raw_facts, run_id=rid)
         any_running = any(info["state"] == "running" for info in facts_map.values())
@@ -2532,7 +2655,8 @@ def stop_run(
             plan=plan,
             provider=eff_provider,
             partial=True,
-            allow_missing=True,
+            allow_missing=False,
+            stopped_early=True,
         )
         payload = write_results(
             run_dir(root, actual_run_id),
@@ -2613,18 +2737,28 @@ def read_job_log(
     if around is not None:
         line_window = (max(1, around - context), around + context)
 
-    grep_re = re.compile(grep) if grep else None
+    grep_re: re.Pattern[str] | None = None
+    if grep:
+        try:
+            grep_re = re.compile(grep)
+        except re.error as exc:
+            raise ConfigError(
+                f"invalid --grep regex {grep!r}: {exc}",
+                code="CFG_INVALID",
+            ) from None
     matched: list[tuple[int, str]] = []
+    raw_last_line = 0
     for lineno, text in provider.transport.read_lines(rel_log, lines=line_window):
+        raw_last_line = max(raw_last_line, lineno)
         if grep_re is not None and not grep_re.search(text):
             continue
         matched.append((lineno, text))
 
     if follow:
-        last_line = matched[-1][0] if matched else 0
-        for _, text in matched:
+        last_line = raw_last_line
+        for lineno, text in matched:
             if ui.is_json_mode():
-                output.emit_event("log_line", job_id=target_label, text=text)
+                output.emit_event("log_line", job_id=target_label, line=lineno, text=text)
             else:
                 ui.info(text)
         while facts_rel and provider.transport.exists(facts_rel):
@@ -2633,17 +2767,24 @@ def read_job_log(
                 still_running = parse_facts(facts_txt).state == "running"
             except FactsError:
                 still_running = False
-            for lineno, text in provider.transport.read_lines(rel_log):
-                if lineno <= last_line:
-                    continue
-                last_line = lineno
-                if grep_re is not None and not grep_re.search(text):
-                    continue
-                matched.append((lineno, text))
-                if ui.is_json_mode():
-                    output.emit_event("log_line", job_id=target_label, line=lineno, text=text)
-                else:
-                    ui.info(text)
+            while True:
+                batch_seen = 0
+                for lineno, text in provider.transport.read_lines(
+                    rel_log, lines=(last_line + 1, last_line + 5000)
+                ):
+                    batch_seen += 1
+                    if lineno <= last_line:
+                        continue
+                    last_line = lineno
+                    if grep_re is not None and not grep_re.search(text):
+                        continue
+                    matched.append((lineno, text))
+                    if ui.is_json_mode():
+                        output.emit_event("log_line", job_id=target_label, line=lineno, text=text)
+                    else:
+                        ui.info(text)
+                if batch_seen < 5000:
+                    break
             if not still_running:
                 break
             time.sleep(0.2)
@@ -2697,8 +2838,11 @@ def clean_project(
         )
 
     removed: list[str] = []
+    is_remote = not local_only and type(provider.transport) is not LocalTransport
     if all_files:
-        if (root / ".solouvm").exists():
+        has_local = (root / ".solouvm").exists()
+        has_remote = is_remote and provider.transport.exists(".solouvm")
+        if has_local or has_remote:
             _rm_path(provider, root, ".solouvm", local_only=local_only)
             removed.append(".solouvm")
         return {"removed": removed, "mode": "all", "local_only": local_only}
@@ -2708,6 +2852,12 @@ def clean_project(
             rel = lock_path.relative_to(root).as_posix()
             _rm_path(provider, root, rel, local_only=local_only)
             removed.append(rel)
+        if is_remote:
+            provider.transport.exec(
+                ["sh", "-c", "find .solouvm -name '*.lock' -exec rm -rf {} + 2>/dev/null || true"],
+                cwd=".",
+                check=False,
+            )
         return {"removed": removed, "mode": "locks", "local_only": local_only}
 
     if run_id is not None:
@@ -2723,8 +2873,12 @@ def clean_project(
     pruned = prune_history(root, keep=config.history.keep)
     removed_runs = list(pruned.get("removed_runs", []))
     removed_builds = list(pruned.get("removed_builds", []))
-    if not local_only and type(provider.transport) is not LocalTransport:
-        for rel in [*removed_runs, *removed_builds]:
+    if is_remote:
+        remote_rels = [
+            *(f".solouvm/runs/{r}" for r in removed_runs),
+            *(f".solouvm/build/{b}" for b in removed_builds),
+        ]
+        for rel in remote_rels:
             _rm_path(provider, root, rel, local_only=False)
     return {
         "removed": [*removed_runs, *removed_builds],

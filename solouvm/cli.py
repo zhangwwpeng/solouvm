@@ -4,19 +4,20 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import io
 import json
-import shlex
+import os
 import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
 
 from solouvm import __version__, hooks, output, pipeline, ui
-from solouvm.backends import get_backend
+from solouvm.backends import resolve_sim_backend
 from solouvm.backends.base import Backend
 from solouvm.check import format_check_result, run_check
 from solouvm.cli_parser import Handler, build_parser
-from solouvm.collect import collect_cases, collect_files, load_filelist
+from solouvm.collect import collect_cases
 from solouvm.completion import generate_completion
 from solouvm.config import Config, find_config, load_config
 from solouvm.cov import cov_merge, cov_report
@@ -90,17 +91,7 @@ def _load_ctx(args: argparse.Namespace) -> tuple[Config, Provider]:
 
 
 def _backend_for(config: Config) -> Backend:
-    overrides = {
-        k: (
-            shlex.join(v)
-            if isinstance(v, list)
-            and k not in ("error_regex", "license_regex")
-            and all(isinstance(x, str) for x in v)
-            else v
-        )
-        for k, v in config.sim.items()
-    }
-    return get_backend(config.simulator, overrides)
+    return resolve_sim_backend(config.simulator, config.sim)
 
 
 def _selection(args: argparse.Namespace) -> dict[str, object]:
@@ -164,8 +155,17 @@ def _resolve_run_provider(
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
+    raw_dir = getattr(args, "dir", None)
+    if raw_dir:
+        init_root = Path(raw_dir).expanduser().resolve()
+    elif getattr(args, "config", None):
+        cfg_p = Path(args.config).expanduser()
+        init_root = (cfg_p.parent if cfg_p.suffix == ".py" else cfg_p).resolve()
+    else:
+        init_root = Path.cwd()
+    init_root.mkdir(parents=True, exist_ok=True)
     created = init_project(
-        root=Path.cwd(),
+        root=init_root,
         simulator=args.simulator,
         bare=args.bare,
         agents=args.agents,
@@ -225,7 +225,10 @@ def _cmd_files(args: argparse.Namespace) -> int:
 
 def _cmd_validate(args: argparse.Namespace) -> int:
     target = Path(args.config) if args.config else Path.cwd()
-    report = validate_project(target)
+    cli_overrides: dict[str, object] | None = (
+        {"provider": args.provider} if getattr(args, "provider", None) else None
+    )
+    report = validate_project(target, cli=cli_overrides)
     exit_code = 0 if report.ok else 2
     if ui.is_json_mode():
         data = {
@@ -253,11 +256,16 @@ def _cmd_list(args: argparse.Namespace) -> int:
     config, _provider = _load_ctx(args)
     cases = collect_cases(config)
     warns: list[str] = []
+    preview_id = (
+        "preview"
+        if (getattr(args, "shard_seed", None) or os.environ.get("SOLOUVM_SHARD_SEED", "").strip())
+        else f"preview-{os.urandom(4).hex()}"
+    )
     plan = build_plan(
         cases=cases,
         config=config,
         selection=_selection(args),
-        run_id="preview",
+        run_id=preview_id,
         allow_empty=args.allow_empty,
         force=True,
         order=args.order,
@@ -370,7 +378,7 @@ def _cmd_uvm_diff(args: argparse.Namespace) -> int:
 
 def _cmd_lint_style(args: argparse.Namespace) -> int:
     config, _ = _load_ctx(args)
-    flist = collect_files(config.root, load_filelist(config.root))
+    flist = collect_project_files(config)
     issues = lint_style(config.root, files=flist)
     has_err = any(i.severity == "error" for i in issues)
     code = 1 if issues else 0
@@ -395,7 +403,8 @@ def _cmd_lint_style(args: argparse.Namespace) -> int:
 def _plan_for_exec(config: Config, provider: Provider, args: argparse.Namespace) -> Plan:
     cases = collect_cases(config)
     warns: list[str] = []
-    run_id = pipeline.make_run_id(config.root, reserve=True)
+    is_dry = bool(getattr(args, "dry_run", False))
+    run_id = pipeline.make_run_id(config.root, reserve=not is_dry)
     try:
         plan = build_plan(
             cases=cases,
@@ -410,8 +419,9 @@ def _plan_for_exec(config: Config, provider: Provider, args: argparse.Namespace)
             rng_seed=getattr(args, "shard_seed", None),
         )
     except BaseException:
-        with contextlib.suppress(OSError):
-            run_dir(config.root, run_id).rmdir()
+        if not is_dry:
+            with contextlib.suppress(OSError):
+                run_dir(config.root, run_id).rmdir()
         raise
     plan.provider = provider.name
     for w in warns:
@@ -513,6 +523,10 @@ def _run_or_regress(args: argparse.Namespace, *, require_selector: bool) -> int:
 
 def _cmd_rerun(args: argparse.Namespace) -> int:
     config, provider = _load_ctx(args)
+    if args.note_ref is None and not getattr(args, "provider", None):
+        with contextlib.suppress(ConfigError):
+            actual_base = resolve_run_id(config.root, args.run_id)
+            provider, _ = _resolve_run_provider(config, provider, args, actual_base)
     budget_s = _parse_budget_arg(getattr(args, "budget", None))
     max_fail = _validate_max_fail(getattr(args, "max_fail", None))
     failed = bool(args.failed or (not args.status and args.note_ref is None))
@@ -1388,8 +1402,24 @@ def _handlers() -> dict[str, Handler]:
 
 def main(argv: list[str] | None = None) -> int:
     """Parse CLI arguments and dispatch the requested subcommand."""
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    wants_json = "--json" in raw_argv
     parser = build_parser(_handlers())
-    args = parser.parse_args(argv)
+    if wants_json:
+        err_buf = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err_buf):
+                args = parser.parse_args(raw_argv)
+        except SystemExit as exc:
+            if exc.code in (0, None):
+                raise
+            ui.reset()
+            ui.setup(json_mode=True, quiet=False, verbose=0, limit=_DEFAULT_LIMIT)
+            lines = [ln.strip() for ln in err_buf.getvalue().splitlines() if ln.strip()]
+            msg = lines[-1] if lines else "invalid command-line arguments"
+            return output.fail(ConfigError(msg, code="CFG_INVALID"), command="solouvm")
+    else:
+        args = parser.parse_args(argv)
     eff_limit = _DEFAULT_LIMIT if args.limit is None else args.limit
     ui.reset()
     ui.setup(
@@ -1413,6 +1443,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         func = getattr(args, "func", None)
         if func is None:
+            if ui.is_json_mode():
+                raise ConfigError("missing subcommand", code="CFG_INVALID")
             parser.print_usage(sys.stderr)
             return 2
         check_role(args.role, canon)
@@ -1433,16 +1465,17 @@ def main(argv: list[str] | None = None) -> int:
                 command=canon,
                 emit_json_events=emit_main_pre_json,
             )
-        rc = int(func(args))
-        if hook_root is not None:
-            hooks.run_hook(
-                phase="post",
-                stage="main",
-                root=hook_root,
-                command=canon,
-                exit_code=rc,
-                emit_json_events=False,
-            )
+        with output.defer_json_envelope():
+            rc = int(func(args))
+            if hook_root is not None:
+                hooks.run_hook(
+                    phase="post",
+                    stage="main",
+                    root=hook_root,
+                    command=canon,
+                    exit_code=rc,
+                    emit_json_events=False,
+                )
     except SolouvmError as exc:
         return output.fail(exc, command=canon or "solouvm")
     except KeyboardInterrupt:

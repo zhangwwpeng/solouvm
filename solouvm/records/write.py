@@ -239,6 +239,8 @@ def _is_case_call(node: ast.AST) -> bool:
 
 
 def _case_call_name(node: ast.Call) -> object:
+    if node.args and isinstance(node.args[0], ast.Constant):
+        return node.args[0].value
     for kw in node.keywords:
         if kw.arg == "name" and isinstance(kw.value, ast.Constant):
             return kw.value.value

@@ -14,9 +14,11 @@ from solouvm.collect.files import (
     FileEntry,
     FileList,
     LoadedFilelist,
+    ProjectFilelist,
     collect_files,
     load_filelist,
     load_filelist_meta,
+    load_project_filelists,
 )
 
 __all__ = [
@@ -27,11 +29,13 @@ __all__ = [
     "FileEntry",
     "FileList",
     "LoadedFilelist",
+    "ProjectFilelist",
     "case_file_for",
     "collect_cases",
     "collect_cases_with_sources",
     "collect_files",
     "load_filelist",
     "load_filelist_meta",
+    "load_project_filelists",
     "parse_dotf",
 ]

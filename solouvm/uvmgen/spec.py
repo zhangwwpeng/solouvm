@@ -73,14 +73,28 @@ class Signal:
     """Protocol signal declared inside an :class:`Interface`."""
 
     name: str
-    width: int
+    width: int | str
     dir: str  # "m2s" or "s2m"
 
     def __post_init__(self) -> None:
         _check_ident("Signal", "name", self.name)
         owner = f"Signal {self.name!r}"
-        if not _is_int(self.width) or self.width < 1:
-            raise _spec_error(f"{owner}: field 'width' must be a positive int, got {self.width!r}")
+        if _is_int(self.width):
+            if self.width < 1:  # type: ignore[operator]
+                raise _spec_error(
+                    f"{owner}: field 'width' must be a positive int, got {self.width!r}"
+                )
+        elif isinstance(self.width, str):
+            cleaned_w = self.width.strip()
+            if not cleaned_w or any(ch in cleaned_w for ch in ("\n", "\r", ";")):
+                raise _spec_error(
+                    f"{owner}: string 'width' must be a non-empty expression, got {self.width!r}"
+                )
+            object.__setattr__(self, "width", cleaned_w)
+        else:
+            raise _spec_error(
+                f"{owner}: field 'width' must be a positive int or str, got {self.width!r}"
+            )
         if self.dir not in _SIGNAL_DIRS:
             raise _spec_error(
                 f"{owner}: field 'dir' has invalid value {self.dir!r}; "

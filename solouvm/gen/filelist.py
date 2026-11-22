@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import posixpath
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -39,14 +40,17 @@ def _format_path(
     outside: bool | None = None,
 ) -> str:
     check_no_newlines(raw, field="filelist path")
-    if "$" in raw or outside is True:
+    if "$" in raw:
         return raw
-    root_rel, is_outside = _resolve_in_root(root, resolved_root, raw)
-    if is_outside:
-        return raw
-    if base_rel == ".":
-        return root_rel
-    return relpath(root_rel, base_rel)
+    if os.path.isabs(raw):
+        if outside is True:
+            return raw
+        root_rel, is_outside = _resolve_in_root(root, resolved_root, raw)
+        if is_outside:
+            return raw
+        return root_rel if base_rel == "." else relpath(root_rel, base_rel)
+    norm_rel = posixpath.normpath(raw.replace("\\", "/"))
+    return norm_rel if base_rel == "." else relpath(norm_rel, base_rel)
 
 
 def _dedupe_directives(lines: list[str]) -> list[str]:

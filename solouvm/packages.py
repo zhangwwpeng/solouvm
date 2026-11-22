@@ -15,8 +15,10 @@ from solouvm.collect.files import (
     PACKAGE_GROUPS,
     FileList,
     LoadedFilelist,
+    ProjectFilelist,
     _Collector,
     load_filelist_meta,
+    load_project_filelists,
 )
 from solouvm.config.schema import Config, PackageConfig
 from solouvm.errors import ConfigError, InfraError, SolouvmError
@@ -28,6 +30,7 @@ __all__ = [
     "PACKAGES_DIR",
     "ResolvedPackage",
     "check_host_depends",
+    "collect_from_resolved",
     "collect_project_files",
     "ensure_packages",
     "list_packages",
@@ -392,34 +395,51 @@ def check_host_depends(
             )
 
 
-def resolve_project_files(
-    config: Config,
-    *,
-    auto_fetch: bool = True,
-) -> tuple[FileList, list[ResolvedPackage], LoadedFilelist]:
-    """Resolve packages + host ``filelist.py``, check ``DEPENDS``, and return merged files."""
-    root = Path(config.root)
-    pkgs = resolve_packages(config, auto_fetch=auto_fetch)
-    host_filelist = load_filelist_meta(root)
-    check_host_depends(host_filelist, {pkg.name for pkg in pkgs})
-
+def collect_from_resolved(
+    root: Path,
+    pkgs: Sequence[ResolvedPackage],
+    project_filelists: Sequence[ProjectFilelist],
+) -> FileList:
+    """Merge resolved packages and discovered project filelists into a :class:`FileList`."""
     collector = _Collector(root)
     for pkg in pkgs:
+        pkg_is_rel = pkg.config.git is not None or (
+            pkg.config.path is not None and not Path(pkg.config.path).is_absolute()
+        )
         collector.add_spec(
             pkg.filelist.spec,
             base_dir=pkg.root_dir,
             source_prefix=f"pkg:{pkg.name}:",
             allowed_groups=PACKAGE_GROUPS,
             use_base_for_dash_f=True,
+            prefer_relative=pkg_is_rel,
         )
-    collector.add_spec(
-        host_filelist.spec,
-        base_dir=collector.root,
-        source_prefix="",
-        allowed_groups=GROUPS,
-        use_base_for_dash_f=False,
-    )
-    return collector.finalize(), pkgs, host_filelist
+    for pfl in project_filelists:
+        is_root = pfl.rel_dir == "."
+        collector.add_spec(
+            pfl.meta.spec,
+            base_dir=pfl.root_dir,
+            source_prefix="" if is_root else f"{pfl.rel_dir}/filelist.py:",
+            allowed_groups=GROUPS,
+            use_base_for_dash_f=not is_root,
+            prefer_relative=True,
+        )
+    return collector.finalize()
+
+
+def resolve_project_files(
+    config: Config,
+    *,
+    auto_fetch: bool = True,
+) -> tuple[FileList, list[ResolvedPackage], list[ProjectFilelist]]:
+    """Resolve packages + project ``filelist.py`` files, check ``DEPENDS``, and merge files."""
+    root = Path(config.root)
+    pkgs = resolve_packages(config, auto_fetch=auto_fetch)
+    project_fls = load_project_filelists(root, config.filelist_dirs)
+    loaded_names = {pkg.name for pkg in pkgs}
+    for pfl in project_fls:
+        check_host_depends(pfl.meta, loaded_names)
+    return collect_from_resolved(root, pkgs, project_fls), pkgs, project_fls
 
 
 def collect_project_files(config: Config, *, auto_fetch: bool = True) -> FileList:

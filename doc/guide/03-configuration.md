@@ -19,7 +19,7 @@ CLI 命令行参数 > 环境变量 > solouvm.local.py (LOCAL) > solouvm.conf.py 
 
 | 键 | 含义 | 默认值 / 说明 |
 |----|------|---------------|
-| `simulator` | 必填：仿真器名 | 内置 `fake` / `vcs` / `xrun` / `questa` / `iverilog` / `verilator` |
+| `simulator` | 必填：仿真器名 | 内置 `fake` / `vcs` / `xrun` / `questa` / `xezim` / `verilator` |
 | `top` | 必填：仿真顶层模块名 | 如 `"tb_top"` |
 | `project` | 项目名称 | 默认取根目录名 |
 | `uvm_test` | 全局默认 UVM test 名 | `None` |
@@ -33,6 +33,7 @@ CLI 命令行参数 > 环境变量 > solouvm.local.py (LOCAL) > solouvm.conf.py 
 | `providers` / `provider` | 调度与远端传输配置 | 默认 `"local"`；每个 provider 含 `transport`, `launcher`, `sync`, `setup` |
 | `check` | Fast Compile 配置 | `slang`, `slang_args`, `uvm_src`, `exclude`, `faketop`, `where` (`"auto"`) |
 | `case_dirs` | Case 文件目录列表 | 默认 `[]`（自动加载根目录 `case.py`） |
+| `filelist_dirs` | 追加查找 `filelist.py` 的相对目录列表 | 默认 `[]`（先查项目根，再依次追加 `../rtl` 等相对目录） |
 | `system_doc` | 注入分诊包的系统文档路径 | `[]` |
 | `triage` | 分诊策略 | `pass_policy` (`"changed"`), `group_by` (`"signature"`), `packet_limit` (`20000`), `debug_dir` (`"docs/debug"`), `weak_signals` (`True`) |
 | `doc` / `history` / `limits` / `uvm` / `plugins` | 文档导出、历史保留、上限、模板、插件 | `doc={"lang":"zh","out":"docs/cases"}`；`history={"keep":50}`；`limits={"max_jobs":2000}` |

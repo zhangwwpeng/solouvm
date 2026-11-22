@@ -125,12 +125,33 @@ class Expect:
             )
         if self.uvm_info_min is not None and self.id is None:
             raise _case_error(f"Expect: field 'uvm_info_min' ({self.uvm_info_min!r}) requires 'id'")
+        if self.id is not None and self.uvm_info_min is None:
+            raise _case_error(f"Expect: field 'id' ({self.id!r}) requires 'uvm_info_min'")
+        if (self.count_min is not None or self.count_max is not None) and self.regex is None:
+            raise _case_error("Expect: 'count_min'/'count_max' require 'regex'")
+        if (
+            (self.min is not None or self.max is not None)
+            and self.scoreboard is None
+            and self.regex is None
+        ):
+            raise _case_error("Expect: 'min'/'max' require 'scoreboard' or 'regex'")
         if self.regex is not None:
             _check_regex("Expect", "regex", self.regex)
         for name in ("min", "max", "count_min", "count_max", "uvm_info_min"):
             value = getattr(self, name)
             if value is not None and not _is_int(value):
                 raise _case_error(f"Expect: field {name!r} must be an int, got {value!r}")
+        if self.min is not None and self.max is not None and self.min > self.max:
+            raise _case_error(f"Expect: 'min' ({self.min}) cannot exceed 'max' ({self.max})")
+        if (
+            self.count_min is not None
+            and self.count_max is not None
+            and self.count_min > self.count_max
+        ):
+            raise _case_error(
+                f"Expect: 'count_min' ({self.count_min}) cannot exceed "
+                f"'count_max' ({self.count_max})"
+            )
         if self.sim_time_min is not None:
             try:
                 self.sim_time_ns = parse_sim_time_ns(self.sim_time_min)

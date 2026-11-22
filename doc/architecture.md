@@ -105,7 +105,7 @@ solouvm/
     scripts.py         run_job.sh、launch.sh 模板                            (X)
   backends/
     base.py            后端接口：编译/运行/种子/波形/覆盖率命令、错误模式    (S)
-    vcs.py xrun.py questa.py iverilog.py verilator.py fake.py
+    vcs.py xrun.py questa.py xezim.py verilator.py fake.py
     fake_sim.sh        假仿真器的 bash 实现（S-06、D22），由 fake.py 渲染进生成物
   providers/
     base.py            Transport、Launcher、Sync 三个接口                    (H)

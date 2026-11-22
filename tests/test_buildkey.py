@@ -431,3 +431,46 @@ def test_buildkey_detects_same_size_and_mtime_content_replacement(tmp_path: Path
 
     k2 = compute_build_key(config=cfg, files=files, backend=backend, mode="default", run_id="r2")
     assert k2 != k1
+
+
+def test_buildkey_reusable_and_sensitive_for_sibling_rtl(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    rtl_dir = repo / "rtl"
+    dv_dir = repo / "dv"
+    (rtl_dir / "inc").mkdir(parents=True)
+    dv_dir.mkdir(parents=True)
+    dut = rtl_dir / "dut.sv"
+    hdr = rtl_dir / "inc" / "defs.svh"
+    dut.write_text("module dut; endmodule\n", encoding="utf-8")
+    hdr.write_text("`define W 8\n", encoding="utf-8")
+
+    cfg = _make_config(dv_dir)
+    files = FileList(
+        groups={"rtl": ["../rtl/dut.sv"], "tb": [], "top": []},
+        incdirs={"rtl": ["../rtl/inc"], "tb": [], "top": []},
+        defines={"rtl": [], "tb": [], "top": []},
+        entries=[FileEntry("../rtl/dut.sv", "rtl", "../rtl/filelist.py:dut.sv")],
+        libs={"rtl": [], "tb": [], "top": []},
+    )
+    backend = get_backend("vcs")
+
+    r1 = compute_build_keys(
+        config=cfg, files=files, backend=backend, modes=["default"], run_id="r1"
+    )
+    r2 = compute_build_keys(
+        config=cfg, files=files, backend=backend, modes=["default"], run_id="r2"
+    )
+    assert "default" not in r1.non_reusable
+    assert r1.keys["default"] == r2.keys["default"]
+
+    dut.write_text("module dut; logic x; endmodule\n", encoding="utf-8")
+    r3 = compute_build_keys(
+        config=cfg, files=files, backend=backend, modes=["default"], run_id="r3"
+    )
+    assert r3.keys["default"] != r1.keys["default"]
+
+    hdr.write_text("`define W 16\n", encoding="utf-8")
+    r4 = compute_build_keys(
+        config=cfg, files=files, backend=backend, modes=["default"], run_id="r4"
+    )
+    assert r4.keys["default"] != r3.keys["default"]

@@ -9,6 +9,7 @@ import os
 import posixpath
 import shlex
 import subprocess
+import threading
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
@@ -112,6 +113,8 @@ class SshTransport:
         **kwargs: Any,
     ) -> subprocess.CompletedProcess[Any]:
         log_command(full_argv)
+        if "input" not in kwargs and "stdin" not in kwargs:
+            kwargs["stdin"] = subprocess.DEVNULL
         try:
             return subprocess.run(full_argv, timeout=timeout, check=False, **kwargs)
         except subprocess.TimeoutExpired as exc:
@@ -250,7 +253,11 @@ class SshTransport:
         full_argv = [*self._ssh_base(), self._remote_cd_cmd(argv, cwd=cwd)]
         log_command(full_argv)
         try:
-            return subprocess.Popen(full_argv, start_new_session=True)
+            return subprocess.Popen(
+                full_argv,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
         except OSError as exc:
             raise InfraError(f"failed to spawn ssh: {exc}", code="PROVIDER_FAILED") from exc
 
@@ -260,8 +267,10 @@ class SshTransport:
         *,
         keywords: Sequence[str] | None = None,
         lines: tuple[int, int] | None = None,
+        timeout: float | _UnsetType | None = _UNSET,
     ) -> Iterator[tuple[int, str]]:
         """Stream ``(1-based lineno, line)`` from remote ``path`` using compressed ssh."""
+        eff_timeout = self._resolve_timeout(timeout)
         remote_path = self._remote_path(path)
         q_path = sh_quote(remote_path, field="path")
         kw_list = list(keywords) if keywords else []
@@ -288,15 +297,39 @@ class SshTransport:
         full_argv = [*self._ssh_base(compress=True), remote_cmd]
         log_command(full_argv)
         try:
-            proc = subprocess.Popen(full_argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            proc = subprocess.Popen(
+                full_argv,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
         except OSError as exc:
             raise InfraError(f"failed to run ssh: {exc}", code="PROVIDER_FAILED") from exc
 
         assert proc.stdout is not None
         assert proc.stderr is not None
+        timed_out = threading.Event()
+        timer: threading.Timer | None = None
+
+        def _arm_watchdog() -> None:
+            nonlocal timer
+            if timer is not None:
+                timer.cancel()
+            if eff_timeout is not None:
+                def _on_timeout() -> None:
+                    timed_out.set()
+                    with contextlib.suppress(OSError):
+                        proc.kill()
+
+                timer = threading.Timer(eff_timeout, _on_timeout)
+                timer.daemon = True
+                timer.start()
+
         try:
+            _arm_watchdog()
             stream = io.TextIOWrapper(proc.stdout, encoding="utf-8", errors="replace")
             for raw in stream:
+                _arm_watchdog()
                 clean = raw.rstrip("\r\n")
                 lineno_str, sep, text = clean.partition(":")
                 if not sep or not lineno_str.isdigit():
@@ -308,16 +341,25 @@ class SshTransport:
             err_bytes = proc.stderr.read()
             rc = proc.wait()
         finally:
+            if timer is not None:
+                timer.cancel()
             if proc.poll() is None:
                 with contextlib.suppress(OSError):
                     proc.terminate()
-                with contextlib.suppress(OSError):
+                with contextlib.suppress(OSError, subprocess.TimeoutExpired):
                     proc.wait(timeout=5)
             with contextlib.suppress(OSError):
                 proc.stdout.close()
             with contextlib.suppress(OSError):
                 proc.stderr.close()
 
+        if timed_out.is_set():
+            raise InfraError(
+                f"ssh read_lines timed out after {eff_timeout:g}s for "
+                f"{remote_path!r} on {self.host!r}",
+                code="PROVIDER_FAILED",
+                hint="check network connectivity or ssh_opts",
+            )
         if rc not in allowed_rc:
             err_text = err_bytes.decode("utf-8", errors="replace").strip()
             msg = f"ssh read_lines failed for {remote_path!r} on {self.host!r} (exit code {rc})"

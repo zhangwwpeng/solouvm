@@ -118,13 +118,16 @@ def create_component(
     for path, content in rendered.items():
         if path.exists():
             is_shared_if = (
-                kind == "agent"
-                and path.name.endswith("_if.sv")
-                and path.parent.name != name
-                and path.read_text(encoding="utf-8") == content
+                kind == "agent" and path.name.endswith("_if.sv") and path.parent.name != name
             )
-            if not is_shared_if:
-                conflicts.append(path)
+            if is_shared_if:
+                existing = path.read_text(encoding="utf-8")
+                if existing != content:
+                    merged_if, _, _ = merge_regions(content, existing)
+                    if merged_if != existing:
+                        to_write[path] = merged_if
+                continue
+            conflicts.append(path)
             continue
         to_write[path] = content
 
