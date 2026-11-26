@@ -603,3 +603,100 @@ def test_positional_case_bug_reopen_notes_triage_expect_and_json_cli_errors(
     hook_env = json.loads(capsys.readouterr().out)
     assert hook_env["ok"] is False and hook_env["error"]["code"] == "HOOK_FAILED"
     _ = write_results, read_results_json, subprocess
+
+
+def test_questa_live_transcript_scan_and_makefile_cov_wave(tmp_path: Path) -> None:
+    """QuestaSim 2024 '# ' transcript prefix, 2-line $finish Time, +acc, and -do cov_run."""
+    from solouvm.judge.scan import scan
+    from solouvm.model import Checks
+
+    backend = get_backend("questa")
+    lines = textwrap.dedent(
+        """\
+        # vsim -c -lib work solouvm_opt +UVM_TESTNAME=smoke_test
+        # UVM_INFO @ 0: reporter [RNTST] Running test smoke_test...
+        # UVM_INFO tb/tb_top.sv(12) @ 50000: uvm_test_top [adder_scb] compared=4 errors=0
+        # UVM_INFO tb/tb_top.sv(13) @ 50000: uvm_test_top [TEST] SOLOUVM_DONE
+        # --- UVM Report Summary ---
+        # ** Report counts by severity
+        # UVM_INFO :    6
+        # UVM_WARNING :    0
+        # UVM_ERROR :    0
+        # UVM_FATAL :    0
+        # ** Note: $finish    : /opt/uvm/src/base/uvm_root.svh(527)
+        #    Time: 50 ns  Iteration: 54  Instance: /tb_top
+        """
+    ).splitlines()
+    res = scan(lines, backend=backend, checks=Checks())
+    assert res.uvm_counts == {"INFO": 6, "WARNING": 0, "ERROR": 0, "FATAL": 0}
+    assert res.scoreboard["adder_scb"] == 4
+    assert res.sim_end_ns == pytest.approx(50.0)
+    assert res.is_uvm is True
+    assert res.sim_errors == []
+
+    # Also verify '# ** Error:' is detected as a simulator error
+    err_res = scan(
+        ["# ** Error: (vsim-3033) Instantiation of 'foo' failed."],
+        backend=backend,
+        checks=Checks(),
+    )
+    assert len(err_res.sim_errors) == 1
+
+    # Verify Makefile generation for Questa with coverage=True preserves both +acc,
+    # cov_run's -do 'coverage save -onexit ...', and conditional WAVE -do
+    root = tmp_path / "qproj"
+    _write(
+        root / "solouvm.conf.py",
+        """
+        CFG = {
+            "simulator": "questa",
+            "top": "tb_top",
+            "builds": {"cov": {"coverage": True}},
+        }
+        """,
+    )
+    _write(root / "filelist.py", 'FILES = {"rtl": ["dut.sv"], "tb": [], "top": []}\n')
+    _write(root / "dut.sv", "module tb_top; endmodule\n")
+    _write(root / "case.py", 'from solouvm import Case\nCASES = [Case(name="c1", build="cov")]\n')
+    cfg = load_config(root)
+    files = collect_files(root, load_filelist(root))
+    plan = build_plan(cases=collect_cases(cfg), config=cfg, run_id="r-q")
+    mk = render_run_mk(
+        config=cfg, plan=plan, backend=backend, files=files, build_keys={"cov": "abc123"}
+    )
+    assert "qrun -64 -sv -optimize +acc" in mk
+    assert "qrun -64 -c -simulate -outdir" in mk
+    assert "-coverage -do 'coverage save -onexit ./cov.ucdb'" in mk
+    assert "-wlf ./wave.wlf -do 'log -r /*; run -all; quit -f'" in mk
+    assert "-covdb" not in mk
+
+
+def test_detect_sim_version_ssh_single_line_and_remote_cwd(tmp_path: Path) -> None:
+    """detect_sim_version must not emit newlines in ssh command or pass local root as cwd."""
+    from solouvm.history import detect_sim_version
+
+    captured: list[tuple[list[str], str | None]] = []
+
+    class _FakeSshTransport:
+        # Mimics SshTransport having kind="ssh" and a local .root attribute
+        kind = "ssh"
+        root = tmp_path
+
+        def exec_output(
+            self, cmd: list[str], *, cwd: str | None = None, check: bool = True
+        ) -> tuple[int, str]:
+            captured.append((cmd, cwd))
+            assert all("\n" not in part for part in cmd)
+            assert cwd == "."
+            return 0, "QuestaSim-64 vsim 2024.1 Simulator\n"
+
+    prov = Provider(
+        name="ubuntu",
+        transport=_FakeSshTransport(),  # type: ignore[arg-type]
+        launcher=MakeLauncher(),
+        sync=NoneSync(),
+        setup='export PATH="/opt/questa/bin:$PATH" && export LM_LICENSE_FILE="/opt/lic.dat"',
+    )
+    ver = detect_sim_version(get_backend("questa"), prov, root=tmp_path)
+    assert ver == "QuestaSim-64 vsim 2024.1 Simulator"
+    assert len(captured) == 1

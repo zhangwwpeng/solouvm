@@ -379,7 +379,7 @@ def detect_sim_version(backend: Backend, provider: Provider, root: Path) -> str 
     cmd_str = raw_cmd.replace("{root}", ".").strip()
     setup = provider.setup.strip() if provider.setup else ""
     if setup:
-        argv = ["bash", "-c", f"{{\n{setup}\n}} >/dev/null 2>&1 && {cmd_str}"]
+        argv = ["bash", "-c", f"{{ {setup}; }} >/dev/null 2>&1 && {cmd_str}"]
     elif _SHELL_META_RE.search(cmd_str):
         argv = ["bash", "-c", cmd_str]
     else:
@@ -395,11 +395,10 @@ def detect_sim_version(backend: Backend, provider: Provider, root: Path) -> str 
         return None
 
     is_local = getattr(provider.transport, "kind", "local") == "local"
-    has_root = getattr(provider.transport, "root", None) is not None
-    cwd = str(root) if (is_local or has_root) else "."
+    cwd = str(root) if is_local else "."
     try:
         rc, out = exec_output(argv, cwd=cwd, check=False)
-    except (InfraError, OSError, ValueError):
+    except (ConfigError, InfraError, OSError, ValueError):
         return None
     if rc != 0 or not isinstance(out, str):
         return None

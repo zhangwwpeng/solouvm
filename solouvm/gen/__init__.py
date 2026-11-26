@@ -72,6 +72,14 @@ def write_generated_project_files(
         _write_text(root / rel_path, content, mode=0o755)
         manifest.append(rel_path)
 
+    if backend.name == "vcs":
+        vcs_tcl_rel = ".solouvm/gen/bin/vcs_wave.tcl"
+        _write_text(
+            root / vcs_tcl_rel,
+            "fsdbDumpfile wave.fsdb\nfsdbDumpvars 0\nrun\nquit\n",
+        )
+        manifest.append(vcs_tcl_rel)
+
     entry_mk_rel = ".solouvm/Makefile"
     _write_text(root / entry_mk_rel, render_entry_makefile(version))
     manifest.append(entry_mk_rel)

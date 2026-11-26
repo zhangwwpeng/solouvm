@@ -172,11 +172,11 @@ def test_builtin_values():
     assert xezim.build == "xezim --compile -F {filelist} -s {top}"
     assert xezim.run == "xezim -F {filelist} -s {top}"
     assert xezim.seed == "-svseed {seed}"
-    assert xezim.wave == "--wave"
+    assert xezim.wave == "--fst wave.fst"
     assert xezim.cov_build == "--code-coverage"
     assert xezim.cov_run == "--code-coverage"
     assert xezim.compile_only == "xezim --compile -F {filelist_tb} {fake_top} -s solouvm_fake_top"
-    assert xezim.version == "xezim --version"
+    assert xezim.version == "xezim -V"
     assert fake.build == "bash {root}/.solouvm/gen/bin/fake_sim.sh"
     assert fake.version.endswith("+SOLOUVM_FAKE_MODE=version")
     assert "--Mdir {build_dir}" in BACKENDS["verilator"].build

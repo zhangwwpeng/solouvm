@@ -418,7 +418,9 @@ def test_render_run_mk_structure_and_determinism(tmp_path: Path) -> None:
     assert "+BLD_OPT" in mk1
     assert "+GLOBAL_OPT" in mk1
     assert "+CASE_OPT" in mk1
-    assert "$(if $(filter 1,$(WAVE)),+fsdb+all=on,)" in mk1
+    assert (
+        "$(if $(filter 1,$(WAVE)),-ucli -do ../../../../../.solouvm/gen/bin/vcs_wave.tcl,)" in mk1
+    )
     # Job without uvm_test omits +UVM_TESTNAME
     cov_section = mk1.split("run/cov_case__7:")[1]
     assert "+UVM_TESTNAME" not in cov_section
@@ -630,12 +632,16 @@ def test_render_run_mk_wraps_compound_shell_commands(tmp_path: Path) -> None:
     cfg = _make_config(tmp_path, simulator="questa")
     job = _make_job(job_id="smoke__1", case="smoke", seed=1)
     plan = _make_plan(jobs=[job])
+    compound_build = get_backend(
+        "questa",
+        {"build": "vlib work && vlog -work work -sv -f {filelist} && vopt {top} -o {simv_name}"},
+    )
     mk = render_run_mk(
         plan=plan,
         config=cfg,
         files=_make_files(),
         build_keys=plan.builds,
-        backend=get_backend("questa"),
+        backend=compound_build,
     )
     assert "bash -c 'vlib work && vlog -work work -sv -f filelist.f && " in mk
     assert "'&&'" not in mk

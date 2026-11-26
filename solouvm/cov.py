@@ -342,7 +342,7 @@ def _expand_custom_cmd(
     return argv
 
 
-def _exec_tool(provider: Provider, argv: Sequence[str], *, tool: str) -> str:
+def _exec_tool(provider: Provider, argv: Sequence[str], *, tool: str, cwd: str = ".") -> str:
     cmd = [check_no_newlines(str(part), field=tool) for part in argv]
     if provider.setup:
         shell_cmd = f"{provider.setup} && {' '.join(sh_quote(part, field=tool) for part in cmd)}"
@@ -353,7 +353,7 @@ def _exec_tool(provider: Provider, argv: Sequence[str], *, tool: str) -> str:
     exec_output = getattr(provider.transport, "exec_output", None)
     if callable(exec_output):
         try:
-            rc, output = exec_output(exec_argv, cwd=".", check=False)
+            rc, output = exec_output(exec_argv, cwd=cwd, check=False)
         except InfraError as exc:
             hint = exc.hint or (
                 f"ensure {tool!r} is available on execution host or configure provider.setup"
@@ -374,7 +374,7 @@ def _exec_tool(provider: Provider, argv: Sequence[str], *, tool: str) -> str:
         return str(output)
 
     try:
-        rc = provider.transport.exec(exec_argv, cwd=".", check=False)
+        rc = provider.transport.exec(exec_argv, cwd=cwd, check=False)
     except InfraError as exc:
         hint = exc.hint or (
             f"ensure {tool!r} is available on execution host or configure provider.setup"
@@ -484,6 +484,27 @@ def _merge_xezim_json(
                             _merge_hit_dict(
                                 buckets.setdefault(canonical, {}), sub, prefix=f"{fname}:"
                             )
+        code_cov = data.get("code_coverage")
+        if isinstance(code_cov, Mapping):
+            cc_map = {
+                "statement": "line",
+                "line": "line",
+                "branch": "branch",
+                "toggle": "toggle",
+                "condition": "cond",
+                "cond": "cond",
+                "fsm": "fsm",
+            }
+            for cc_key, canonical in cc_map.items():
+                entry = code_cov.get(cc_key)
+                if isinstance(entry, Mapping):
+                    pct = entry.get("percent")
+                    if (
+                        isinstance(pct, (int, float))
+                        and not isinstance(pct, bool)
+                        and 0.0 <= float(pct) <= 100.0
+                    ):
+                        fallback_pct[canonical] = max(fallback_pct.get(canonical, 0.0), float(pct))
         for summary_key in ("summary", "metrics"):
             smap = data.get(summary_key)
             if isinstance(smap, Mapping):
@@ -670,8 +691,16 @@ def cov_merge(
     elif backend.name == "vcs":
         tool = "urg"
         argv = ["urg", "-full64"]
+        seen_dirs: set[str] = set()
+        for mode, bkey in sorted(plan.builds.items()):
+            build_vdb = f".solouvm/build/{mode}/{bkey}/{backend.simv}.vdb"
+            if build_vdb not in seen_dirs and provider.transport.exists(build_vdb):
+                argv.extend(["-dir", build_vdb])
+                seen_dirs.add(build_vdb)
         for db in db_paths:
-            argv.extend(["-dir", db])
+            if db not in seen_dirs:
+                argv.extend(["-dir", db])
+                seen_dirs.add(db)
         argv.extend(["-dbname", posixpath.join(merged_dir, "merged.vdb")])
     elif backend.name == "xrun":
         tool = "imc"
@@ -736,6 +765,7 @@ def cov_report(
     report_dir = posixpath.join(base_dir, "report")
 
     extra_files: list[str] = []
+    tool_cwd = "."
     custom_report = config.sim.get("cov_report")
     if custom_report is not None:
         argv = _expand_custom_cmd(
@@ -778,7 +808,20 @@ def cov_report(
     elif backend.name == "verilator":
         tool = "verilator_coverage"
         _ensure_remote_dir(provider, report_dir)
-        argv = ["verilator_coverage", "--annotate", report_dir, db_target]
+        # Verilator records source paths relative to its build directory; run from that
+        # build directory when present so --annotate resolves source files cleanly.
+        for mode, bkey in sorted(plan.builds.items()):
+            bcfg = config.builds.get(mode)
+            if bcfg is not None and bcfg.coverage:
+                cand_cwd = f".solouvm/build/{mode}/{bkey}"
+                if provider.transport.exists(cand_cwd):
+                    tool_cwd = cand_cwd
+                    break
+        rel_report = (
+            posixpath.relpath(report_dir, tool_cwd) if tool_cwd != "." else report_dir
+        )
+        rel_db = posixpath.relpath(db_target, tool_cwd) if tool_cwd != "." else db_target
+        argv = ["verilator_coverage", "--annotate", rel_report, rel_db]
     elif backend.name == "xezim":
         metrics, summary_text = _report_xezim_json(provider, db_target, report_dir)
         return {
@@ -801,7 +844,7 @@ def cov_report(
             ),
         )
 
-    output = _exec_tool(provider, argv, tool=tool)
+    output = _exec_tool(provider, argv, tool=tool, cwd=tool_cwd)
     text_parts = [output]
     for path in extra_files:
         extra_text = _read_optional_file(provider, path)

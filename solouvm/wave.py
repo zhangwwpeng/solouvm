@@ -6,6 +6,7 @@ import posixpath
 import re
 import shlex
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import suppress
 from fnmatch import fnmatch
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -23,12 +24,13 @@ if TYPE_CHECKING:
 
 __all__ = ["find_waveform", "format_wave_table", "query_wave"]
 
-_WAVE_EXTENSIONS: tuple[str, ...] = (".fsdb", ".vcd", ".wlf", ".shm")
+_WAVE_EXTENSIONS: tuple[str, ...] = (".fsdb", ".vcd", ".fst", ".wlf", ".shm")
 _PREFERRED_WAVE_NAMES: tuple[str, ...] = (
     "wave.fsdb",
     "novas.fsdb",
     "wave.vcd",
     "dump.vcd",
+    "wave.fst",
     "wave.wlf",
     "waves.shm",
     "wave.shm",
@@ -787,6 +789,37 @@ def query_wave(
         output = _exec_wave_tool(provider, argv, tool="fsdbreport")
         matched_signals, rows, truncated = _parse_fsdbreport_output(
             output,
+            patterns=clean_signals,
+            from_ns=from_ns,
+            to_ns=to_ns,
+            changes_only=changes_only,
+            limit=limit,
+        )
+        # Real Verdi fsdbreport writes to report.txt and requires slash-separated paths;
+        # fall back to fsdb2vcd when fsdbreport stdout yields no matched signals.
+        if not matched_signals:
+            tmp_vcd = f"{wave_path}.solouvm-{uuid4().hex}.vcd"
+            with suppress(InfraError):
+                matched_signals, rows, truncated = _query_converted_vcd(
+                    provider=provider,
+                    wave_path=wave_path,
+                    tool="fsdb2vcd",
+                    build_argv=["fsdb2vcd", wave_path, "-o", tmp_vcd],
+                    tmp_vcd=tmp_vcd,
+                    patterns=clean_signals,
+                    from_ns=from_ns,
+                    to_ns=to_ns,
+                    changes_only=changes_only,
+                    limit=limit,
+                )
+    elif ext == ".fst":
+        tmp_vcd = f"{wave_path}.solouvm-{uuid4().hex}.vcd"
+        matched_signals, rows, truncated = _query_converted_vcd(
+            provider=provider,
+            wave_path=wave_path,
+            tool="fst2vcd",
+            build_argv=["fst2vcd", wave_path, "-o", tmp_vcd],
+            tmp_vcd=tmp_vcd,
             patterns=clean_signals,
             from_ns=from_ns,
             to_ns=to_ns,

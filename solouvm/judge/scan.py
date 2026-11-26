@@ -19,10 +19,10 @@ if TYPE_CHECKING:
 __all__ = ["SEVERITIES", "ScanResult", "scan"]
 
 _SUMMARY_HEADER = "** Report counts by severity"
-_SUMMARY_COUNT = re.compile(r"^\s*UVM_(INFO|WARNING|ERROR|FATAL)\s*:\s*(\d+)\s*$")
+_SUMMARY_COUNT = re.compile(r"^\s*(?:#\s*)?UVM_(INFO|WARNING|ERROR|FATAL)\s*:\s*(\d+)\s*$")
 # UVM 消息行：UVM_ERROR <文件>(<行>) @ <时间>: <reporter> [<ID>] <消息>
-# 文件与行号可能被 +UVM_REPORT_DISABLE_FILE_LINE 关掉，匹配不依赖它们。
-_UVM_MSG = re.compile(r"^\s*UVM_(INFO|WARNING|ERROR|FATAL)\b")
+# 文件与行号可能被 +UVM_REPORT_DISABLE_FILE_LINE 关掉，匹配不依赖它们；兼容 Questa `# ` 前缀。
+_UVM_MSG = re.compile(r"^\s*(?:#\s*)?UVM_(INFO|WARNING|ERROR|FATAL)\b")
 _UVM_TIME_ID = re.compile(r"@\s*([^:]*?)\s*:\s*(?:\S+\s+)?\[([^\]\s]+)\]")
 _DONE_MARKER = re.compile(r"SOLOUVM_DONE\s+status=(\S+)")
 # scoreboard 汇总打印（uvm-style.md §5.2）：[<ID>] compared=<N> ...

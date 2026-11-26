@@ -891,6 +891,7 @@ def test_xrun_incremental_questa_compound_and_layer_flags(
     _write_exec(stub_bin / "vlib", '#!/usr/bin/env bash\nmkdir -p "$1"\nexit 0\n')
     _write_exec(stub_bin / "vlog", "#!/usr/bin/env bash\nexit 0\n")
     _write_exec(stub_bin / "vopt", "#!/usr/bin/env bash\nexit 0\n")
+    _write_exec(stub_bin / "qrun", "#!/usr/bin/env bash\nexit 0\n")
     monkeypatch.setenv("PATH", f"{stub_bin}:/usr/bin:/bin")
 
     # 1. slang_only skips faketop and incremental
