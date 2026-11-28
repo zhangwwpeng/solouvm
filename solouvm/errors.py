@@ -121,8 +121,8 @@ class HookError(SolouvmError):
 
 
 def format_error(err: SolouvmError) -> str:
-    """Human-readable error text: ``solouvm: error: ...`` plus an optional hint line."""
-    text = f"solouvm: error: {err}"
+    """Human-readable error text: ``[error] ...`` plus an optional ``[info] hint: ...`` line."""
+    text = f"[error] {err}"
     if err.hint:
-        text += f"\nhint: {err.hint}"
+        text += f"\n[info] hint: {err.hint}"
     return text

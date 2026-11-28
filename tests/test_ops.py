@@ -182,7 +182,8 @@ def test_run_doctor_passes_on_fake_project(tmp_path: Path) -> None:
     names = {c.name for c in checks}
     assert {"python", "config", "make", "simulator", "b_tools_and_workdir"} <= names
     text = format_doctor(checks)
-    assert "[OK]" in text
+    assert "[info] (A) python:" in text
+    assert "[ok]" not in text
 
 
 def test_run_doctor_fails_when_simulator_missing(

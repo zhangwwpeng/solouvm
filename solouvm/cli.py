@@ -196,7 +196,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
     if ui.is_json_mode():
         output.emit_json("config", {"entries": shown, "total": len(entries)}, truncated=trunc)
         return 0
-    ui.summary(format_show_config(shown))
+    ui.raw(format_show_config(shown))
     return 0
 
 
@@ -246,7 +246,10 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         }
         output.emit_json("validate", data, next_=["solouvm list"] if report.ok else [])
         return exit_code
-    ui.summary(report.format_text())
+    if report.issues:
+        ui.raw(report.format_text())
+    else:
+        ui.summary(report.format_text())
     return exit_code
 
 
@@ -367,7 +370,7 @@ def _cmd_uvm_sync(args: argparse.Namespace) -> int:
         output.emit_json("uvm sync", data)
         return 0
     if args.dry_run and rep.diff:
-        ui.info(rep.diff)
+        ui.raw(rep.diff, respect_quiet=True)
     for path in rep.review_connections:
         ui.warning(f"review DUT connections in {path}")
     ui.summary(
@@ -383,7 +386,10 @@ def _cmd_uvm_diff(args: argparse.Namespace) -> int:
     if ui.is_json_mode():
         output.emit_json("uvm diff", {"diff": diff_text})
         return 0
-    ui.summary(diff_text or "(no changes)")
+    if diff_text:
+        ui.raw(diff_text)
+    else:
+        ui.summary("(no changes)")
     return 0
 
 
@@ -406,7 +412,7 @@ def _cmd_lint_style(args: argparse.Namespace) -> int:
         )
         return code
     for issue in issues:
-        ui.info(issue.format())
+        ui.raw(issue.format(), respect_quiet=True)
     ui.summary(f"lint-style: {len(issues)} issue(s)" + (" (errors)" if has_err else ""))
     return code
 
@@ -482,7 +488,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
         output.emit_json("build", res)
         return 0
     if args.dry_run:
-        ui.summary("\n".join(str(c) for c in res.get("commands", [])))
+        ui.raw("\n".join(str(c) for c in res.get("commands", [])))
     else:
         ui.summary(f"built {len(res['modes'])} mode(s) for run {plan.run_id}")
     return 0
@@ -526,7 +532,7 @@ def _run_or_regress(args: argparse.Namespace, *, require_selector: bool) -> int:
                 next_=[f"solouvm triage plan --run {plan.run_id}"] if code == 1 else [],
             )
     elif args.dry_run and payload is not None:
-        ui.summary("\n".join(str(c) for c in payload.get("commands", [])))
+        ui.raw("\n".join(str(c) for c in payload.get("commands", [])))
     elif args.detach and code == 0:
         ui.summary(f"started detached run {plan.run_id}")
         output.emit_next([f"solouvm status --run {plan.run_id}"])
@@ -563,7 +569,7 @@ def _cmd_rerun(args: argparse.Namespace) -> int:
     if ui.is_json_mode():
         output.emit_json("rerun", payload)
     elif args.dry_run and payload is not None:
-        ui.summary("\n".join(str(c) for c in payload.get("commands", [])))
+        ui.raw("\n".join(str(c) for c in payload.get("commands", [])))
     elif args.detach and code == 0:
         ui.summary(f"started rerun {new_plan.run_id}")
     return code
@@ -590,7 +596,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
     if args.fmt == "json":
         print(format_check_result(res, fmt="json"))
     else:
-        ui.summary(format_check_result(res, fmt=args.fmt))
+        ui.raw(format_check_result(res, fmt=args.fmt))
     return code
 
 
@@ -639,7 +645,7 @@ def _cmd_log(args: argparse.Namespace) -> int:
         return 0
     if not args.follow:
         for row in data["lines"]:
-            ui.info(f"{row['line']}: {row['text']}")
+            ui.raw(f"{row['line']}: {row['text']}", respect_quiet=True)
         if data["truncated"]:
             t = data["truncated"]
             ui.info(f"... omitted {t['omitted']}; use {t['more']}")
@@ -1226,7 +1232,10 @@ def _cmd_cov_report(args: argparse.Namespace) -> int:
     if ui.is_json_mode():
         output.emit_json("cov report", res)
         return 0
-    ui.summary(str(res.get("output") or f"coverage report in {res['report_dir']}"))
+    if res.get("output"):
+        ui.raw(str(res["output"]))
+    else:
+        ui.summary(f"coverage report in {res['report_dir']}")
     return 0
 
 
@@ -1270,8 +1279,8 @@ def _cmd_help(args: argparse.Namespace) -> int:
         return 0
     topics = data.get("topics") or []
     assert isinstance(topics, list)
-    print("Available topics: " + ", ".join(str(t) for t in topics))
-    print(data.get("usage", "solouvm help <topic>"))
+    ui.info("Available topics: " + ", ".join(str(t) for t in topics))
+    ui.info(str(data.get("usage", "solouvm help <topic>")))
     return 0
 
 
@@ -1290,7 +1299,7 @@ def _cmd_update(args: argparse.Namespace) -> int:
     if args.dry_run:
         cmds = res.get("commands") or []
         assert isinstance(cmds, list)
-        ui.summary("\n".join(str(c) for c in cmds))
+        ui.raw("\n".join(str(c) for c in cmds))
         return 0
     out_text = str(res.get("output") or "").strip()
     if out_text and not ui.is_quiet():

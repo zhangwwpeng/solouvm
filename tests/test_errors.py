@@ -149,7 +149,7 @@ def test_to_dict_is_json_serializable():
 
 
 def test_format_error_without_hint():
-    assert format_error(RoleError("command not allowed")) == "solouvm: error: command not allowed"
+    assert format_error(RoleError("command not allowed")) == "[error] command not allowed"
 
 
 def test_format_error_with_hint_and_location():
@@ -157,7 +157,7 @@ def test_format_error_with_hint_and_location():
         "unknown key 'sedes'", hint="did you mean 'seeds'?", file="solouvm.conf.py", line=7
     )
     assert format_error(err) == (
-        "solouvm: error: solouvm.conf.py:7: unknown key 'sedes'\nhint: did you mean 'seeds'?"
+        "[error] solouvm.conf.py:7: unknown key 'sedes'\n[info] hint: did you mean 'seeds'?"
     )
 
 

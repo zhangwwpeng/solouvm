@@ -10,6 +10,14 @@ else
   PY="python3"
 fi
 
+log_info() {
+  PYTHONPATH="${SCRIPT_DIR}" "${PY}" -c 'import sys; from solouvm import info; info(sys.argv[1])' "$*"
+}
+
+log_error() {
+  PYTHONPATH="${SCRIPT_DIR}" "${PY}" -c 'import sys; from solouvm import error; error(sys.argv[1])' "$*"
+}
+
 QUICK=0
 for arg in "$@"; do
   case "$arg" in
@@ -35,7 +43,7 @@ EOF
       exit 0
       ;;
     *)
-      echo "Unknown option: $arg" >&2
+      log_error "Unknown option: $arg"
       exit 2
       ;;
   esac
@@ -46,30 +54,25 @@ run_solouvm() {
 }
 
 if [ "${QUICK}" -eq 1 ]; then
-  echo "=== [smoke_test] regress --rebuild (5 stages + hooks + live logs) ==="
+  log_info "smoke_test: regress --rebuild (5 stages + hooks + live logs)"
   run_solouvm regress --rebuild
   exit 0
 fi
 
-echo "=== [1/6] solouvm validate ==="
+log_info "smoke_test: solouvm validate"
 run_solouvm validate
 
-echo ""
-echo "=== [2/6] solouvm list ==="
+log_info "smoke_test: solouvm list"
 run_solouvm list
 
-echo ""
-echo "=== [3/6] solouvm regress --rebuild (5 stages + A/B hooks + live logs) ==="
+log_info "smoke_test: solouvm regress --rebuild (5 stages + A/B hooks + live logs)"
 run_solouvm regress --rebuild
 
-echo ""
-echo "=== [4/6] solouvm run --case smoke (cached build + single-job live sim) ==="
+log_info "smoke_test: solouvm run --case smoke (cached build + single-job live sim)"
 run_solouvm run --case smoke
 
-echo ""
-echo "=== [5/6] solouvm regress --no-hooks --case smoke (skip A-side hooks) ==="
+log_info "smoke_test: solouvm regress --no-hooks --case smoke (skip A-side hooks)"
 run_solouvm regress --no-hooks --case smoke
 
-echo ""
-echo "=== [6/6] solouvm history ==="
+log_info "smoke_test: solouvm history"
 run_solouvm history

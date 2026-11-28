@@ -53,7 +53,7 @@ def test_missing_vendor_dir_falls_back_cleanly(monkeypatch, tmp_path, capsys):
         assert omitted == 0
 
         out = capsys.readouterr().out
-        assert "plain info" in out
+        assert "[info] plain info" in out
         assert "COL" in out
         assert "val" in out
         assert "\x1b[" not in out
@@ -124,10 +124,13 @@ def test_non_tty_has_no_ansi_escapes(capsys):
     captured = capsys.readouterr()
     assert "\x1b[" not in captured.out
     assert "\x1b[" not in captured.err
-    assert "hello [red]world[/red]" in captured.out
-    assert "1/2 done" in captured.out
-    assert "2 jobs from 2 cases" in captured.out
-    assert "JOB       CASE" in captured.out
+    assert "[info] hello [red]world[/red]" in captured.out
+    assert "[info] 1/2 done" in captured.out
+    assert "[info] 2 jobs from 2 cases" in captured.out
+    assert "JOB  : burst__1" in captured.out
+    assert "CASE : burst" in captured.out
+    assert "JOB  : smoke__2" in captured.out
+    assert "CASE : smoke" in captured.out
 
 
 def test_tty_uses_rich_when_not_json(monkeypatch):
@@ -142,9 +145,13 @@ def test_tty_uses_rich_when_not_json(monkeypatch):
     ui.info("UVM_ERROR [AXI_SCB] [b]literal")
     ui.table(["JOB", "STAGE"], [["burst__1", "wip"]])
     out = buf.getvalue()
-    assert "UVM_ERROR [AXI_SCB] [b]literal" in out
+    plain = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", out)
+    assert "[info] UVM_ERROR [AXI_SCB] [b]literal" in plain
     assert "burst__1" in out
-    assert "┏" in out  # rendered via Rich Table box drawing
+    assert "┏" not in plain
+    assert "JOB   : burst__1" in plain
+    assert "STAGE : wip" in plain
+    assert "\x1b[" in out
 
 
 def test_live_runner_tty_and_non_tty_modes(monkeypatch, capsys):
@@ -182,14 +189,16 @@ def test_live_runner_tty_and_non_tty_modes(monkeypatch, capsys):
     assert live.is_live is False
     assert ui._state.active_live is None
     tty_out = buf.getvalue()
+    tty_plain = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", tty_out)
     assert "[AXI_MON] compiling a.sv" in tty_out
-    assert "via active live [uvm_pkg]" in tty_out
+    assert "[info] via active live [uvm_pkg]" in tty_plain
 
 
 def test_live_runner_collapsible_stages_and_verbose_mode(monkeypatch):
     ansi_re = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
-    # 1. Default TTY (verbose=0): collapsible viewport hides on success, keeps tail on failure
+    # 1. Default TTY (verbose=0): collapsible 5-line rolling viewport hides on success
+    assert ui._STAGE_VIEW_HEIGHT == 5
     buf = _TtyBuffer()
     monkeypatch.setattr(sys, "stdout", buf)
     monkeypatch.setenv("TERM", "xterm-256color")
@@ -206,6 +215,10 @@ def test_live_runner_collapsible_stages_and_verbose_mode(monkeypatch):
         assert len(live._render_footer().renderables) == h_empty
         live.log_batch([f"extra_{i}" for i in range(20)])
         assert len(live._render_footer().renderables) == h_empty
+        viewport_rows = [r.plain for r in live._render_footer().renderables[1:-2]]
+        assert len(viewport_rows) == 5
+        assert all("earlier lines" not in row for row in viewport_rows)
+        assert viewport_rows == [f"  │ extra_{i}" for i in range(15, 20)]
         ui.stage_done(
             "gen",
             "planned 1 job (run.mk, filelist)",
@@ -230,10 +243,10 @@ def test_live_runner_collapsible_stages_and_verbose_mode(monkeypatch):
         assert live.is_collapsible_stage is False
 
     plain = ansi_re.sub("", buf.getvalue())
-    gen_line = f"✓ [1/5] Generate  {'planned 1 job (run.mk, filelist)':<34}    0.05s"
-    fail_line = f"✗ [3/5] Compile   {'failed mode=default (rc=2)':<34}    0.20s"
+    gen_line = f"[info]  Generate  {'planned 1 job (run.mk, filelist)':<34}    0.05s"
+    fail_line = f"[error] Compile   {'failed mode=default (rc=2)':<34}    0.20s"
     assert gen_line in plain
-    assert "▾ [3/5] Compile   compiling mode=default" in plain
+    assert "[error] Compile   compiling mode=default" in plain
     assert "FAIL_LINE_A" in plain
     assert "FAIL_LINE_B" in plain
     assert fail_line in plain
@@ -257,9 +270,49 @@ def test_live_runner_collapsible_stages_and_verbose_mode(monkeypatch):
         )
 
     plain_v = ansi_re.sub("", buf_v.getvalue())
-    assert "==> [1/5] Generate  planning 1 job (run.mk, filelist)" in plain_v
+    assert "[info]  Generate  planning 1 job (run.mk, filelist)" in plain_v
     assert "VERBOSE_LINE_1" in plain_v
-    assert f"✓ [1/5] Generate  {'planned 1 job (run.mk, filelist)':<34}    0.02s" in plain_v
+    assert f"[info]  Generate  {'planned 1 job (run.mk, filelist)':<34}    0.02s" in plain_v
+
+
+def test_stage_info_aligns_with_stage_lines(monkeypatch, capsys):
+    ansi_re = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+    ui.setup(json_mode=False, quiet=False, verbose=0)
+    ui.stage_start("build", "compiling mode=default", index=3, total=5)
+    ui.stage_info("build", "[build/default] cached (abc123)")
+    ui.stage_info("build", "[build/default] finished", duration_s=0.0)
+    ui.stage_info("build", "[build/default] failed (rc=2)", ok=False, duration_s=0.12)
+    ui.stage_done("build", "compiled mode=default", index=3, total=5, ok=True, duration_s=0.16)
+
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 5
+    for ln in lines:
+        assert ln.index("Compile") == 8
+    assert lines[0].index("compiling mode=default") == 18
+    assert lines[1].index("[build/default] cached (abc123)") == 18
+    assert lines[2].index("[build/default] finished") == 18
+    assert lines[3].index("[build/default] failed (rc=2)") == 18
+    assert lines[4].index("compiled mode=default") == 18
+    assert lines[2].index("0.00s") == lines[3].index("0.12s") == lines[4].index("0.16s")
+
+    # Collapsible TTY stage folds stage_info inside viewport and collapses on success
+    buf = _TtyBuffer()
+    monkeypatch.setattr(sys, "stdout", buf)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    ui.setup(json_mode=False, quiet=False, verbose=0)
+    with ui.live_runner("run r1") as live:
+        ui.stage_start("build", "compiling mode=default", index=3, total=5)
+        ui.stage_info("build", "[build/default] finished", duration_s=0.04)
+        assert any("[build/default] finished" in entry[2] for entry in live._stage_lines)
+        ui.stage_done("build", "compiled mode=default", index=3, total=5, ok=True, duration_s=0.05)
+        assert not live._stage_lines
+
+    plain = ansi_re.sub("", buf.getvalue())
+    plain_lines = [ln.lstrip("\r") for ln in plain.splitlines()]
+    assert any(ln.startswith("[info]  Compile   compiled mode=default") for ln in plain_lines)
+    fin = "[info]  Compile   [build/default] finished"
+    assert any(ln.startswith(f"  │ {fin}") for ln in plain_lines)
+    assert not any(ln.startswith(fin) for ln in plain_lines)
 
 
 def test_ui_echo_persists_above_collapsible_stage_and_respects_json_quiet(monkeypatch):
@@ -287,9 +340,9 @@ def test_ui_echo_persists_above_collapsible_stage_and_respects_json_quiet(monkey
         assert not live._stage_lines
 
     plain = ansi_re.sub("", buf.getvalue())
-    assert "  [hooks/post_hook_judge.py] PERSIST_MSG [OK]" in plain
-    assert "test_ui.py] AUTO_SRC_MSG" in plain
-    assert f"✓ [1/5] Generate  {'planned 1 job (run.mk, filelist)':<34}    0.03s" in plain
+    assert "[info] [hooks/post_hook_judge.py] PERSIST_MSG [OK]" in plain
+    assert "[info] " in plain and "test_ui.py] AUTO_SRC_MSG" in plain
+    assert f"[info]  Generate  {'planned 1 job (run.mk, filelist)':<34}    0.03s" in plain
 
     for kwargs in ({"json_mode": True}, {"quiet": True}):
         silent = _TtyBuffer()
@@ -358,20 +411,25 @@ def test_print_run_summary_rich_tables_and_non_tty_fallback(monkeypatch, capsys)
     ui.print_run_summary(payload, compare=compare, fallback_text="FALLBACK_TEXT")
     out = buf.getvalue()
     plain = ansi_re.sub("", out)
-    assert plain.count("┏") == 1
+    assert "┏" not in plain
     assert "FALLBACK_TEXT" not in plain
     assert "Run r_tbl" in plain
+    assert "JOB    : burst__2" in plain
+    assert "STATUS : fail" in plain
+    assert "CAT    : design" in plain
+    assert "DETAIL : UVM_ERROR=1" in plain
+    assert "LOG    : .solouvm/runs/r_tbl/burst__2/try1/sim.log" in plain
+    assert "JOB    : smoke__1" in plain
+    assert "DETAIL : weak: no UVM messages" in plain
     assert "Total (1/2)" in plain
     assert "50.0%" in plain
     assert "2.500s" in plain
     assert "pass=1" in plain and "fail=1" in plain
     assert "xfail=0" not in plain
-    assert "burst__2" in plain and "smoke__1" in plain
-    assert "weak: no UVM messages" in plain
     assert "sig1" in plain
     assert "Compare vs r_base" in plain
 
-    # Empty jobs payload still renders cleanly in a single table
+    # Empty jobs payload still renders cleanly without box tables
     buf_empty = _TtyBuffer()
     monkeypatch.setattr(sys, "stdout", buf_empty)
     ui.print_run_summary(
@@ -391,7 +449,7 @@ def test_print_run_summary_rich_tables_and_non_tty_fallback(monkeypatch, capsys)
         fallback_text="FALLBACK_TEXT",
     )
     plain_empty = ansi_re.sub("", buf_empty.getvalue())
-    assert plain_empty.count("┏") == 1
+    assert "┏" not in plain_empty
     assert "Total (0/0)" in plain_empty
     assert "(no jobs)" in plain_empty
 
@@ -437,7 +495,7 @@ def test_json_mode_suppresses_human_stdout_and_disables_rich(monkeypatch, capsys
     ui.warning("careful")
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err == "warning: careful\n"
+    assert captured.err == "[warn] careful\n"
 
 
 def test_quiet_mode_suppresses_info_status_and_table_but_keeps_summary_and_errors(capsys):
@@ -450,19 +508,88 @@ def test_quiet_mode_suppresses_info_status_and_table_but_keeps_summary_and_error
     ui.error("bad thing")
 
     captured = capsys.readouterr()
-    assert captured.out == "final summary\n"
-    assert "warning: deprecated case\n" in captured.err
-    assert "solouvm: error: bad thing\n" in captured.err
+    assert captured.out == "[info] final summary\n"
+    assert "[warn] deprecated case\n" in captured.err
+    assert "[error] bad thing\n" in captured.err
 
 
 def test_error_does_not_double_prefix(capsys):
-    ui.error("solouvm: error: already formatted")
+    ui.info("[info] already tagged info")
+    ui.warning("warning: legacy warn")
+    ui.warning("[warn] already tagged warn")
+    ui.error("[error] already formatted")
+    ui.error("solouvm: error: legacy prefix")
     ui.error("error: short prefix")
-    err = capsys.readouterr().err.splitlines()
-    assert err == [
-        "solouvm: error: already formatted",
-        "error: short prefix",
+    captured = capsys.readouterr()
+    assert captured.out.splitlines() == ["[info] already tagged info"]
+    assert captured.err.splitlines() == [
+        "[warn] legacy warn",
+        "[warn] already tagged warn",
+        "[error] already formatted",
+        "[error] legacy prefix",
+        "[error] short prefix",
     ]
+
+
+def test_unified_coloring_and_top_level_logging_api(monkeypatch, capsys):
+    from solouvm import echo as top_echo
+    from solouvm import error as top_error
+    from solouvm import info as top_info
+    from solouvm import warn as top_warn
+    from solouvm.ops import DoctorCheck, format_doctor
+
+    ansi_re = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+    out_buf = _TtyBuffer()
+    err_buf = _TtyBuffer()
+    monkeypatch.setattr(sys, "stdout", out_buf)
+    monkeypatch.setattr(sys, "stderr", err_buf)
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+    ui.setup(json_mode=False, quiet=False, verbose=2)
+    checks = [
+        DoctorCheck(name="python", location="A", ok=True, detail="3.13"),
+        DoctorCheck(name="slang", location="A", ok=False, detail="missing", required=False),
+        DoctorCheck(
+            name="vcs", location="B", ok=False, detail="missing", hint="install vcs", required=True
+        ),
+    ]
+    ui.summary(format_doctor(checks))
+    top_info("top info")
+    top_echo("top echo", source="custom.py")
+    top_warn("top warn")
+    top_error("top error")
+    ui.command_log(["echo", "hi"])
+
+    tty_out = out_buf.getvalue()
+    tty_err = err_buf.getvalue()
+    for line in [ln for ln in tty_out.splitlines() if ln.strip()]:
+        assert "\x1b[" in line
+    for line in [ln for ln in tty_err.splitlines() if ln.strip()]:
+        assert "\x1b[" in line
+
+    plain_out = ansi_re.sub("", tty_out)
+    plain_err = ansi_re.sub("", tty_err)
+    assert "[info] (A) python: 3.13" in plain_out
+    assert "[warn] (A) slang: missing" in plain_out
+    assert "[error] (B) vcs: missing" in plain_out
+    assert "[info] hint: install vcs" in plain_out
+    assert "[info] 1/3 checks passed" in plain_out
+    assert "[info] top info" in plain_out
+    assert "[info] [custom.py] top echo" in plain_out
+    assert "[warn] top warn" in plain_err
+    assert "[error] top error" in plain_err
+    assert "[cmd] echo hi" in plain_err
+
+    monkeypatch.undo()
+    ui.setup(json_mode=False, quiet=False, verbose=2)
+    top_info("plain top info")
+    top_warn("plain top warn")
+    top_error("plain top error")
+    ui.command_log(["echo", "plain"])
+    cap = capsys.readouterr()
+    assert "\x1b[" not in cap.out and "\x1b[" not in cap.err
+    assert cap.out == "[info] plain top info\n"
+    assert cap.err == "[warn] plain top warn\n[error] plain top error\n[cmd] echo plain\n"
 
 
 # ---------- ui.py: -vv command tracing (Z-07) ----------
@@ -499,6 +626,8 @@ def test_command_log_only_traces_when_verbose_at_least_two(tmp_path, capsys):
 def test_format_table_and_table_truncation(capsys):
     assert ui.format_table([], []) == ""
     assert ui.format_table(["JOB", "CASE"], []) == "JOB  CASE"
+    rendered = ui.format_table(["JOB", "DETAIL"], [["j1", "first line\nsecond line"]])
+    assert rendered == "JOB    : j1\nDETAIL : first line\n         second line"
 
     rows = [[f"job_{i}", f"case_{i}"] for i in range(10)]
     ui.setup(limit=5)
@@ -506,7 +635,7 @@ def test_format_table_and_table_truncation(capsys):
     assert len(shown) == 5
     assert omitted == 5
     out = capsys.readouterr().out
-    assert "job_0" in out
+    assert "JOB  : job_0\nCASE : case_0" in out
     assert "job_4" in out
     assert "job_5" not in out
 
@@ -578,7 +707,9 @@ def test_emit_event_jsonl(capsys):
 def test_emit_next_modes(capsys):
     ui.setup(json_mode=False, quiet=False)
     output.emit_next(["solouvm gen --tag nightly", "solouvm validate"])
-    assert capsys.readouterr().out == ("next: solouvm gen --tag nightly\nnext: solouvm validate\n")
+    assert capsys.readouterr().out == (
+        "[info] next: solouvm gen --tag nightly\n[info] next: solouvm validate\n"
+    )
 
     ui.setup(quiet=True)
     output.emit_next(["solouvm gen"])
@@ -617,8 +748,8 @@ def test_fail_json_and_human_modes(capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == (
-        "solouvm: error: solouvm.conf.py:12: unknown key 'regres' in CFG\n"
-        "hint: did you mean 'regress'?\n"
+        "[error] solouvm.conf.py:12: unknown key 'regres' in CFG\n"
+        "[info] hint: did you mean 'regress'?\n"
     )
 
 

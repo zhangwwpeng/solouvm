@@ -1239,13 +1239,13 @@ def format_doctor(checks: Sequence[DoctorCheck]) -> str:
     """Format doctor check table for human terminal output."""
     lines: list[str] = []
     for chk in checks:
-        mark = "OK" if chk.ok else ("FAIL" if chk.required else "WARN")
+        mark = "info" if chk.ok else ("error" if chk.required else "warn")
         lines.append(f"[{mark}] ({chk.location}) {chk.name}: {chk.detail}")
         if not chk.ok and chk.hint:
-            lines.append(f"      hint: {chk.hint}")
+            lines.append(f"[info] hint: {chk.hint}")
     passed = sum(1 for c in checks if c.ok)
     lines.append("")
-    lines.append(f"{passed}/{len(checks)} checks passed")
+    lines.append(f"[info] {passed}/{len(checks)} checks passed")
     return "\n".join(lines)
 
 

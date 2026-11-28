@@ -31,49 +31,49 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --kind)
             if [ $# -lt 2 ]; then
-                echo "solouvm: error: option $1 requires an argument" >&2
+                echo "[error] option $1 requires an argument" >&2
                 exit 2
             fi
             kind="$2"; shift 2 ;;
         --dir)
             if [ $# -lt 2 ]; then
-                echo "solouvm: error: option $1 requires an argument" >&2
+                echo "[error] option $1 requires an argument" >&2
                 exit 2
             fi
             dir="$2"; shift 2 ;;
         --log)
             if [ $# -lt 2 ]; then
-                echo "solouvm: error: option $1 requires an argument" >&2
+                echo "[error] option $1 requires an argument" >&2
                 exit 2
             fi
             log="$2"; shift 2 ;;
         --run-id)
             if [ $# -lt 2 ]; then
-                echo "solouvm: error: option $1 requires an argument" >&2
+                echo "[error] option $1 requires an argument" >&2
                 exit 2
             fi
             run_id="$2"; shift 2 ;;
         --job-id)
             if [ $# -lt 2 ]; then
-                echo "solouvm: error: option $1 requires an argument" >&2
+                echo "[error] option $1 requires an argument" >&2
                 exit 2
             fi
             job_id="$2"; shift 2 ;;
         --try)
             if [ $# -lt 2 ]; then
-                echo "solouvm: error: option $1 requires an argument" >&2
+                echo "[error] option $1 requires an argument" >&2
                 exit 2
             fi
             try_n="$2"; shift 2 ;;
         --timeout)
             if [ $# -lt 2 ]; then
-                echo "solouvm: error: option $1 requires an argument" >&2
+                echo "[error] option $1 requires an argument" >&2
                 exit 2
             fi
             timeout_s="$2"; shift 2 ;;
         --hang)
             if [ $# -lt 2 ]; then
-                echo "solouvm: error: option $1 requires an argument" >&2
+                echo "[error] option $1 requires an argument" >&2
                 exit 2
             fi
             hang_s="$2"; shift 2 ;;
@@ -81,31 +81,31 @@ while [ $# -gt 0 ]; do
             lock=1; shift ;;
         --setup)
             if [ $# -lt 2 ]; then
-                echo "solouvm: error: option $1 requires an argument" >&2
+                echo "[error] option $1 requires an argument" >&2
                 exit 2
             fi
             setup_cmd="$2"; shift 2 ;;
         --pre)
             if [ $# -lt 2 ]; then
-                echo "solouvm: error: option $1 requires an argument" >&2
+                echo "[error] option $1 requires an argument" >&2
                 exit 2
             fi
             pre_cmd="$2"; shift 2 ;;
         --post)
             if [ $# -lt 2 ]; then
-                echo "solouvm: error: option $1 requires an argument" >&2
+                echo "[error] option $1 requires an argument" >&2
                 exit 2
             fi
             post_cmd="$2"; shift 2 ;;
         --env)
             if [ $# -lt 2 ]; then
-                echo "solouvm: error: option $1 requires an argument" >&2
+                echo "[error] option $1 requires an argument" >&2
                 exit 2
             fi
             env_items+=("$2"); shift 2 ;;
         --mem-limit)
             if [ $# -lt 2 ]; then
-                echo "solouvm: error: option $1 requires an argument" >&2
+                echo "[error] option $1 requires an argument" >&2
                 exit 2
             fi
             mem_limit="$2"; shift 2 ;;
@@ -113,13 +113,13 @@ while [ $# -gt 0 ]; do
             shift
             break ;;
         *)
-            echo "solouvm: error: unknown option $1" >&2
+            echo "[error] unknown option $1" >&2
             exit 2 ;;
     esac
 done
 
 if [ $# -eq 0 ]; then
-    echo "solouvm: error: missing command after --" >&2
+    echo "[error] missing command after --" >&2
     exit 2
 fi
 cmd=("$@")
@@ -127,12 +127,12 @@ cmd=("$@")
 case "$kind" in
     build|job|check) ;;
     *)
-        echo "solouvm: error: invalid --kind '$kind' (expected build, job, or check)" >&2
+        echo "[error] invalid --kind '$kind' (expected build, job, or check)" >&2
         exit 2 ;;
 esac
 
 if [ -z "$dir" ]; then
-    echo "solouvm: error: missing --dir" >&2
+    echo "[error] missing --dir" >&2
     exit 2
 fi
 
@@ -156,11 +156,11 @@ esac
 export SOLOUVM_ROOT
 
 if ! mkdir -p "$dir" 2>/dev/null; then
-    echo "solouvm: error: cannot create $dir" >&2
+    echo "[error] cannot create $dir" >&2
     exit 2
 fi
 abs_dir="$(cd "$dir" 2>/dev/null && pwd -P)" || {
-    echo "solouvm: error: cannot create $dir" >&2
+    echo "[error] cannot create $dir" >&2
     exit 2
 }
 export SOLOUVM_OUTDIR="$abs_dir"
@@ -183,7 +183,7 @@ if [ -n "$forced_impl" ]; then
         timeout)
             timeout_bin=$(command -v timeout 2>/dev/null || true)
             if [ -z "$timeout_bin" ]; then
-                echo "solouvm: error: SOLOUVM_TIMEOUT_IMPL=timeout: timeout not found" >&2
+                echo "[error] SOLOUVM_TIMEOUT_IMPL=timeout: timeout not found" >&2
                 exit 2
             fi
             timeout_impl="timeout"
@@ -191,7 +191,7 @@ if [ -n "$forced_impl" ]; then
         gtimeout)
             timeout_bin=$(command -v gtimeout 2>/dev/null || true)
             if [ -z "$timeout_bin" ]; then
-                echo "solouvm: error: SOLOUVM_TIMEOUT_IMPL=gtimeout: gtimeout not found" >&2
+                echo "[error] SOLOUVM_TIMEOUT_IMPL=gtimeout: gtimeout not found" >&2
                 exit 2
             fi
             timeout_impl="gtimeout"
@@ -200,7 +200,7 @@ if [ -n "$forced_impl" ]; then
             timeout_impl="builtin"
             ;;
         *)
-            echo "solouvm: error: invalid SOLOUVM_TIMEOUT_IMPL '$forced_impl'" >&2
+            echo "[error] invalid SOLOUVM_TIMEOUT_IMPL '$forced_impl'" >&2
             exit 2
             ;;
     esac
@@ -372,7 +372,7 @@ if [ "$lock" -eq 1 ]; then
         if [ -n "$timeout_s" ]; then
             now_s=$(date +%s)
             if LC_ALL=C awk "BEGIN {exit !(($now_s - $lock_start) >= $timeout_s)}"; then
-                echo "solouvm: error: lock timeout on $lock_dir; run 'solouvm clean --locks'" >&2
+                echo "[error] lock timeout on $lock_dir; run 'solouvm clean --locks'" >&2
                 exit 2
             fi
         fi
@@ -408,7 +408,7 @@ start_epoch=$(epoch_now)
 facts_started=1
 
 cd "$abs_dir" || {
-    echo "solouvm: error: cannot enter $abs_dir" >&2
+    echo "[error] cannot enter $abs_dir" >&2
     exit 2
 }
 
@@ -611,13 +611,13 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --run-id)
             if [ $# -lt 2 ]; then
-                echo "solouvm: error: option $1 requires an argument" >&2
+                echo "[error] option $1 requires an argument" >&2
                 exit 2
             fi
             run_id="$2"; shift 2 ;;
         --budget)
             if [ $# -lt 2 ]; then
-                echo "solouvm: error: option $1 requires an argument" >&2
+                echo "[error] option $1 requires an argument" >&2
                 exit 2
             fi
             budget_s="$2"; shift 2 ;;
@@ -627,17 +627,17 @@ while [ $# -gt 0 ]; do
             shift
             break ;;
         *)
-            echo "solouvm: error: unknown option $1" >&2
+            echo "[error] unknown option $1" >&2
             exit 2 ;;
     esac
 done
 
 if [ -z "$run_id" ]; then
-    echo "solouvm: error: missing --run-id" >&2
+    echo "[error] missing --run-id" >&2
     exit 2
 fi
 if [ $# -eq 0 ]; then
-    echo "solouvm: error: missing command after --" >&2
+    echo "[error] missing command after --" >&2
     exit 2
 fi
 
@@ -656,7 +656,7 @@ export SOLOUVM_ROOT
 
 run_dir="$SOLOUVM_ROOT/.solouvm/runs/$run_id"
 if ! mkdir -p "$run_dir" 2>/dev/null; then
-    echo "solouvm: error: cannot create $run_dir" >&2
+    echo "[error] cannot create $run_dir" >&2
     exit 2
 fi
 
@@ -668,7 +668,7 @@ rm -f "$done_file"
 
 if [ "$detach" -eq 1 ]; then
     if ! : >> "$pid_file" || ! : >> "$log_file"; then
-        echo "solouvm: error: cannot record background submission in $run_dir" >&2
+        echo "[error] cannot record background submission in $run_dir" >&2
         exit 2
     fi
     set -m

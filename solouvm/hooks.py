@@ -90,6 +90,18 @@ class HookContext:
         """Emit a persistent message that remains visible when stages collapse."""
         ui.echo(message, source=self.source or None)
 
+    def info(self, message: str) -> None:
+        """Emit a persistent ``[info]`` message tagged with this hook script."""
+        ui.info(message, source=self.source or None)
+
+    def warn(self, message: str) -> None:
+        """Emit a ``[warn]`` message to stderr tagged with this hook script."""
+        ui.warn(message, source=self.source or None)
+
+    def error(self, message: str) -> None:
+        """Emit an ``[error]`` message to stderr tagged with this hook script."""
+        ui.error(message, source=self.source or None)
+
 
 @dataclass(frozen=True)
 class HookRunResult:

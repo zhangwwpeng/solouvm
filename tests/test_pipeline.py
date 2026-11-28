@@ -784,22 +784,32 @@ def test_build_live_log_streaming_cached_multimode_json_and_quiet(
         assert "COMPILE_LINE_1 [DUT]" in out1
         assert "COMPILE_LINE_2 ok" in out1
         assert "[build/default] COMPILE_LINE_1" not in out1
-        assert "[build/default] ok" in out1
+        assert "[info]  Compile   [build/default] finished" in out1
+        lines1 = out1.splitlines()
+        start_ln = next(ln for ln in lines1 if "Compile   compiling mode=default" in ln)
+        fin_ln = next(ln for ln in lines1 if "Compile   [build/default] finished" in ln)
+        done_ln = next(ln for ln in lines1 if "Compile   compiled mode=default" in ln)
+        assert start_ln.index("Compile") == fin_ln.index("Compile") == done_ln.index("Compile")
+        assert (
+            start_ln.index("compiling mode=default")
+            == fin_ln.index("[build/default] finished")
+            == done_ln.index("compiled mode=default")
+        )
 
         # 2. Cached mode prints cached status and does NOT dump stale COMPILE_LINE_1
         cfg2, files2, plan2, prov2 = _make_plan(root, "r-b-cached")
         build(config=cfg2, plan=plan2, provider=prov2, files=files2, modes=["default"], verbose=1)
         out2 = capsys.readouterr().out
-        assert f"[build/default] cached ({plan2.builds['default']})" in out2
+        assert f"[info]  Compile   [build/default] cached ({plan2.builds['default']})" in out2
         assert "COMPILE_LINE_1" not in out2
 
         # 3. Multi-mode build (default cached + cov building) prefixes live lines with [build/cov]
         cfg3, files3, plan3, prov3 = _make_plan(root, "r-b-multi")
         build(config=cfg3, plan=plan3, provider=prov3, files=files3, verbose=1)
         out3 = capsys.readouterr().out
-        assert f"[build/default] cached ({plan3.builds['default']})" in out3
+        assert f"[info]  Compile   [build/default] cached ({plan3.builds['default']})" in out3
         assert "[build/cov] COMPILE_LINE_1 [DUT]" in out3
-        assert "[build/cov] ok" in out3
+        assert "[info]  Compile   [build/cov] finished" in out3
 
         # 4. --json mode emits build_cached, build_start, and build_done JSONL events
         cfg4, files4, plan4, prov4 = _make_plan(root, "r-b-json")
@@ -1018,14 +1028,14 @@ def test_pty_live_build_and_regress_with_rich(tmp_path: Path) -> None:
     assert "PTY_BUILD_LINE_1" in b_out
     assert "PTY_BUILD_LINE_2" in b_out
     b_plain = ansi_re.sub("", b_out)
-    assert "✓ [1/3] Generate" in b_plain
-    assert "✓ [2/3] Sync" in b_plain
-    assert "✓ [3/3] Compile" in b_plain
+    assert "[info]  Generate" in b_plain
+    assert "[info]  Sync" in b_plain
+    assert "[info]  Compile" in b_plain
 
     r_rc, r_out = _run_in_pty("regress")
     assert r_rc == 0, r_out
-    assert "[build/default] cached" in r_out
     assert "PTY_SIM_LINE_1 [AXI_MON]" in r_out
     r_plain = ansi_re.sub("", r_out)
-    for idx, st in enumerate(("Generate", "Sync", "Compile", "Simulate", "Judge"), 1):
-        assert f"✓ [{idx}/5] {st}" in r_plain
+    assert "[info]  Compile   [build/default] cached" in r_plain
+    for st in ("Generate", "Sync", "Compile", "Simulate", "Judge"):
+        assert f"[info]  {st}" in r_plain

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import math
+import re
 import shlex
 import sys
 import threading
@@ -57,6 +58,7 @@ class _UIState:
     log_file: Path | None = None
     limit: int = 50
     console: Any = None
+    err_console: Any = None
     active_live: LiveRunner | None = None
     echo_stream: Any = None
     echo_source: str | None = None
@@ -64,7 +66,7 @@ class _UIState:
 
 _state = _UIState()
 _MAX_STAGE_TAIL_LINES = 25
-_STAGE_VIEW_HEIGHT = 8
+_STAGE_VIEW_HEIGHT = 5
 _STAGE_DISPLAY_NAMES: dict[str, str] = {
     "gen": "Generate",
     "push": "Sync",
@@ -75,6 +77,14 @@ _STAGE_DISPLAY_NAMES: dict[str, str] = {
 _STAGE_NAME_WIDTH = 8
 _STAGE_DETAIL_WIDTH = 34
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+_LEVEL_PREFIX_RE = re.compile(r"^\[(?:info|warn|error|cmd|hook)\](?:\s|$)")
+_TAG_STYLES: dict[str, str] = {
+    "info": "bold cyan",
+    "warn": "bold yellow",
+    "error": "bold red",
+    "cmd": "dim",
+    "hook": "bold yellow",
+}
 
 __all__ = [
     "Console",
@@ -93,17 +103,20 @@ __all__ = [
     "is_tty",
     "live_runner",
     "print_run_summary",
+    "raw",
     "reload_vendor",
     "reset",
     "set_log_file",
     "setup",
     "stage_done",
+    "stage_info",
     "stage_start",
     "status_line",
     "summary",
     "table",
     "use_rich",
     "verbosity",
+    "warn",
     "warning",
 ]
 
@@ -120,6 +133,7 @@ def reload_vendor() -> None:
     module_ns["_Spinner"] = spinner_cls
     module_ns["_Text"] = text_cls
     _state.console = None
+    _state.err_console = None
 
 
 class LiveRunner:
@@ -135,7 +149,6 @@ class LiveRunner:
         self._in_stage = False
         self._stage_header: tuple[str, str, str] | None = None
         self._stage_lines: deque[tuple[str, str, str]] = deque(maxlen=_MAX_STAGE_TAIL_LINES)
-        self._stage_total_lines = 0
         self._started_at = time.monotonic()
         self._live: Any = None
         self._prev_live: LiveRunner | None = None
@@ -197,12 +210,10 @@ class LiveRunner:
                 self._in_stage = True
                 self._stage_header = (idx_tag, stage_col, detail)
                 self._stage_lines.clear()
-                self._stage_total_lines = 0
             else:
                 self._in_stage = False
                 self._stage_header = None
                 self._stage_lines.clear()
-                self._stage_total_lines = 0
         if live is not None:
             live.refresh()
         return collapsible
@@ -216,7 +227,6 @@ class LiveRunner:
             return
         with self._lock:
             self._stage_lines.extend(entries)
-            self._stage_total_lines += len(entries)
             live = self._live
         if live is not None:
             live.refresh()
@@ -240,7 +250,6 @@ class LiveRunner:
             self._in_stage = False
             self._stage_header = None
             self._stage_lines.clear()
-            self._stage_total_lines = 0
             if is_final:
                 self._fixed_view = False
 
@@ -252,7 +261,7 @@ class LiveRunner:
             if header is not None and _Text is not None:
                 h_idx, h_col, h_detail = header
                 htxt = _Text()
-                htxt.append("▾ ", style="bold red")
+                htxt.append("[error] ", style="bold red")
                 if h_idx:
                     htxt.append(f"{h_idx} ", style="bold red")
                 if h_col:
@@ -285,7 +294,6 @@ class LiveRunner:
             in_stage = self._in_stage
             header = self._stage_header
             lines_snap = list(self._stage_lines)
-            total_lines = self._stage_total_lines
             stage_tag = self._stage_tag
             status = self._status
             live = self._live
@@ -294,11 +302,11 @@ class LiveRunner:
         renderables: list[Any] = []
         if fixed_view:
             console_h = getattr(getattr(live, "console", None), "height", 24) or 24
-            view_rows = max(3, min(_STAGE_VIEW_HEIGHT, console_h - 8))
+            view_rows = max(1, min(_STAGE_VIEW_HEIGHT, console_h - 8))
             if in_stage and header is not None:
                 h_idx, h_col, h_detail = header
                 htxt = _Text(no_wrap=True, overflow="ellipsis")
-                htxt.append("▾ ", style="bold blue")
+                htxt.append("[info]  ", style="bold cyan")
                 if h_idx:
                     htxt.append(f"{h_idx} ", style="bold cyan")
                 if h_col:
@@ -310,19 +318,8 @@ class LiveRunner:
                 renderables.append(_Text(""))
 
             if in_stage:
-                if total_lines > view_rows:
-                    keep = max(1, view_rows - 1)
-                    visible = lines_snap[-keep:]
-                    omit_txt = _Text(no_wrap=True, overflow="ellipsis")
-                    omit_txt.append(
-                        f"  │ … ({total_lines - len(visible)} earlier lines)",
-                        style="dim",
-                    )
-                    renderables.append(omit_txt)
-                    used_rows = 1 + len(visible)
-                else:
-                    visible = lines_snap[-view_rows:]
-                    used_rows = len(visible)
+                visible = lines_snap[-view_rows:]
+                used_rows = len(visible)
                 for p_style, prefix, text in visible:
                     ltxt = _Text(no_wrap=True, overflow="ellipsis")
                     ltxt.append("  │ ", style="dim")
@@ -398,7 +395,6 @@ class LiveRunner:
             self._in_stage = False
             self._stage_header = None
             self._stage_lines.clear()
-            self._stage_total_lines = 0
         if _state.active_live is self:
             _state.active_live = prev
         try:
@@ -460,9 +456,12 @@ class LiveRunner:
         else:
             stream = _state.echo_stream
             out = stream if stream is not None else sys.stdout
-            prefix = f"  [{source}] " if source else ""
             for line in lines:
-                print(f"{prefix}{line}", file=out)
+                if not source and _LEVEL_PREFIX_RE.match(line):
+                    print(line, file=out)
+                else:
+                    prefix = f"[info] [{source}] " if source else "[info] "
+                    print(f"{prefix}{line}", file=out)
 
 
 def live_runner(initial_status: str = "") -> LiveRunner:
@@ -476,10 +475,10 @@ def _format_stage_cols(
     index: int | None = None,
     total: int | None = None,
 ) -> tuple[str, str]:
-    idx_tag = f"[{index}/{total}]" if (index is not None and total is not None) else ""
+    _ = (index, total)
     label = _STAGE_DISPLAY_NAMES.get(stage, stage)
     stage_col = f"{label:<{_STAGE_NAME_WIDTH}}" if label else ""
-    return idx_tag, stage_col
+    return "", stage_col
 
 
 def _format_stage_tag(
@@ -560,13 +559,26 @@ def _infer_caller_source() -> str:
 
 def _print_echo_lines(con: Any, lines: Sequence[str], *, source: str) -> None:
     for line in lines:
-        if source and _Text is not None:
+        if not source and _LEVEL_PREFIX_RE.match(line):
+            if _Text is not None:
+                eff_style, prefix, body = _split_tagged("info", line)
+                txt = _Text()
+                txt.append(prefix, style=eff_style)
+                if body:
+                    txt.append(body)
+                con.print(txt)
+            else:
+                con.print(line, markup=False, highlight=False)
+        elif _Text is not None:
             txt = _Text()
-            txt.append(f"  [{source}] ", style="cyan")
+            txt.append("[info] ", style="bold cyan")
+            if source:
+                txt.append(f"[{source}] ", style="cyan")
             txt.append(line)
             con.print(txt)
         else:
-            con.print(line, markup=False, highlight=False)
+            prefix = f"[info] [{source}] " if source else "[info] "
+            con.print(f"{prefix}{line}", markup=False, highlight=False)
 
 
 def echo(message: str, *, source: str | None = None) -> None:
@@ -589,9 +601,12 @@ def echo(message: str, *, source: str | None = None) -> None:
     else:
         stream = _state.echo_stream
         out = stream if stream is not None else sys.stdout
-        prefix = f"  [{eff_source}] " if eff_source else ""
         for line in lines:
-            print(f"{prefix}{line}", file=out)
+            if not eff_source and _LEVEL_PREFIX_RE.match(line):
+                print(line, file=out)
+            else:
+                prefix = f"[info] [{eff_source}] " if eff_source else "[info] "
+                print(f"{prefix}{line}", file=out)
 
 
 def stage_start(
@@ -610,11 +625,11 @@ def stage_start(
         return
     idx_tag, stage_col = _format_stage_cols(stage, index=index, total=total)
     tag = _format_stage_tag(stage, index=index, total=total)
-    plain = f"==> {tag}  {detail}" if detail else f"==> {tag}"
+    plain = f"[info]  {tag}  {detail}" if detail else f"[info]  {tag}"
 
     def _build() -> Any:
         txt = _Text()
-        txt.append("==> ", style="bold blue")
+        txt.append("[info]  ", style="bold cyan")
         if idx_tag:
             txt.append(f"{idx_tag} ", style="bold cyan")
         if stage_col:
@@ -624,6 +639,29 @@ def stage_start(
         return txt
 
     _print_rich_or_plain(plain, _build)
+
+
+def _build_stage_line_renderable(
+    mark: str,
+    idx_tag: str,
+    stage_col: str,
+    msg_col: str,
+    dur_col: str,
+    *,
+    ok: bool,
+) -> Any:
+    txt = _Text()
+    txt.append(mark, style="bold cyan" if ok else "bold red")
+    txt.append(" ")
+    if idx_tag:
+        txt.append(f"{idx_tag} ", style="bold cyan")
+    if stage_col:
+        txt.append(stage_col, style="bold")
+    if msg_col or dur_col:
+        txt.append(f"  {msg_col}")
+    if dur_col:
+        txt.append(f"  {dur_col}", style="dim")
+    return txt
 
 
 def stage_done(
@@ -643,21 +681,19 @@ def stage_done(
     msg = detail or ("done" if ok else "failed")
     msg_col = f"{msg:<{_STAGE_DETAIL_WIDTH}}" if len(msg) <= _STAGE_DETAIL_WIDTH else f"{msg}  "
     dur_col = _fmt_aligned_dur(duration_s)
-    mark = "[ok]  " if ok else "[FAIL]"
+    mark = "[info] " if ok else "[error]"
     dur_part = f"  {dur_col}" if dur_col else ""
     plain = f"{mark} {tag}  {msg_col}{dur_part}".rstrip()
 
     def _build() -> Any:
-        txt = _Text()
-        txt.append("✓ " if ok else "✗ ", style="bold green" if ok else "bold red")
-        if idx_tag:
-            txt.append(f"{idx_tag} ", style="bold cyan")
-        if stage_col:
-            txt.append(stage_col, style="bold")
-        txt.append(f"  {msg_col}")
-        if dur_col:
-            txt.append(f"  {dur_col}", style="dim")
-        return txt
+        return _build_stage_line_renderable(
+            mark,
+            idx_tag,
+            stage_col,
+            msg_col,
+            dur_col,
+            ok=ok,
+        )
 
     is_final = index is not None and total is not None and index >= total
     active = _state.active_live
@@ -667,6 +703,53 @@ def stage_done(
         and active.end_stage(_build(), ok=ok, is_final=is_final)
     ):
         return
+    _print_rich_or_plain(plain, _build)
+
+
+def stage_info(
+    stage: str,
+    detail: str,
+    *,
+    ok: bool = True,
+    duration_s: float | None = None,
+) -> None:
+    """Emit a stage-aligned sub-status line (e.g. build cache/finish or job status)."""
+    if _state.json_mode or _state.quiet:
+        return
+    idx_tag, stage_col = _format_stage_cols(stage)
+    tag = _format_stage_tag(stage)
+    mark = "[info] " if ok else "[error]"
+    dur_col = _fmt_aligned_dur(duration_s)
+    if dur_col:
+        msg_col = (
+            f"{detail:<{_STAGE_DETAIL_WIDTH}}"
+            if len(detail) <= _STAGE_DETAIL_WIDTH
+            else f"{detail}  "
+        )
+        dur_part = f"  {dur_col}"
+    else:
+        msg_col = detail
+        dur_part = ""
+    body = f"{tag}  {msg_col}{dur_part}".rstrip() if (msg_col or dur_col) else tag.rstrip()
+    plain = f"{mark} {body}".rstrip()
+
+    active = _state.active_live
+    if active is not None and active.is_collapsible_stage:
+        style = "bold cyan" if ok else "bold red"
+        active.add_stage_entries([(style, f"{mark} ", body)])
+        return
+
+    def _build() -> Any:
+        eff_col = stage_col if (msg_col or dur_col) else stage_col.rstrip()
+        return _build_stage_line_renderable(
+            mark,
+            idx_tag,
+            eff_col,
+            msg_col,
+            dur_col,
+            ok=ok,
+        )
+
     _print_rich_or_plain(plain, _build)
 
 
@@ -688,17 +771,14 @@ def hook_notice(
 
     if status == "start":
         prefix_style, prefix, body = "bold yellow", "[hook] ", f"{phase}:{stage} ({path})"
-        plain = f"  {prefix}{body}"
     elif status == "log":
-        prefix_style, prefix, body = "dim", f"[{phase}_{stage}] ", detail
-        plain = f"    {prefix}{body}"
+        prefix_style, prefix, body = "dim", "[hook] ", f"[{phase}:{stage}] {detail}"
     elif status == "done":
         dur = _fmt_dur(duration_s)
         prefix_style, prefix, body = "green", "[hook] ", f"{phase}:{stage} ok{dur}"
-        plain = f"  {prefix}{body}"
     else:
         prefix_style, prefix, body = "bold red", "[hook] ", f"{phase}:{stage} failed: {detail}"
-        plain = f"  {prefix}{body}"
+    plain = f"{prefix}{body}"
 
     if active is not None and active.is_collapsible_stage:
         active.add_stage_entries([(prefix_style, prefix, body)])
@@ -706,8 +786,7 @@ def hook_notice(
 
     def _build() -> Any:
         txt = _Text()
-        indent = "    " if status == "log" else "  "
-        txt.append(f"{indent}{prefix}", style=prefix_style)
+        txt.append(prefix, style=prefix_style)
         txt.append(body)
         return txt
 
@@ -733,6 +812,7 @@ def setup(
     _state.log_file = None if log_file is None else Path(log_file)
     _state.limit = int(limit)
     _state.console = None if (Console is None or _state.json_mode) else Console(highlight=False)
+    _state.err_console = None
 
 
 def reset() -> None:
@@ -743,6 +823,7 @@ def reset() -> None:
     _state.log_file = None
     _state.limit = 50
     _state.console = None
+    _state.err_console = None
     _state.active_live = None
     _state.echo_stream = None
     _state.echo_source = None
@@ -797,6 +878,25 @@ def _get_console() -> Any:
     return _state.console
 
 
+def _is_stderr_tty() -> bool:
+    isatty = getattr(sys.stderr, "isatty", None)
+    if isatty is None:
+        return False
+    return bool(isatty())
+
+
+def _use_rich_stderr() -> bool:
+    return Console is not None and not _state.json_mode and _is_stderr_tty()
+
+
+def _get_err_console() -> Any:
+    if Console is None:
+        return None
+    if _state.err_console is None or getattr(_state.err_console, "file", None) is not sys.stderr:
+        _state.err_console = Console(file=sys.stderr, highlight=False)
+    return _state.err_console
+
+
 def _emit_stdout(message: str) -> None:
     active = _state.active_live
     if active is not None and active.is_collapsible_stage:
@@ -809,39 +909,174 @@ def _emit_stdout(message: str) -> None:
         print(message)
 
 
-def info(message: str) -> None:
-    """Print an informational message unless ``--json`` or ``--quiet`` is active."""
-    if _state.json_mode or _state.quiet:
+def _format_tagged(tag: str, message: str) -> str:
+    if _LEVEL_PREFIX_RE.match(message):
+        return message
+    return f"[{tag}] {message}" if message else f"[{tag}]"
+
+
+def _split_tagged(tag: str, message: str) -> tuple[str, str, str]:
+    if _LEVEL_PREFIX_RE.match(message):
+        tag_part, rest = message.split("]", 1)
+        existing = tag_part[1:]
+        eff_style = _TAG_STYLES.get(existing, _TAG_STYLES.get(tag, "bold cyan"))
+        if rest.startswith(" "):
+            return eff_style, f"[{existing}] ", rest[1:]
+        return eff_style, f"[{existing}]", rest
+    eff_style = _TAG_STYLES.get(tag, "bold cyan")
+    if message:
+        return eff_style, f"[{tag}] ", message
+    return eff_style, f"[{tag}]", ""
+
+
+def _emit_tagged(
+    tag: str,
+    message: str,
+    *,
+    style: str | None = None,
+    stream: Any = None,
+) -> None:
+    plain = _format_tagged(tag, message)
+    eff_style, prefix, body = _split_tagged(tag, message)
+    if style is not None and not _LEVEL_PREFIX_RE.match(message):
+        eff_style = style
+    active = _state.active_live
+    if active is not None and active.is_collapsible_stage:
+        active.add_stage_entries([(eff_style, prefix, body)])
+    elif active is not None and active._live is not None:
+        if _Text is not None:
+            txt = _Text()
+            txt.append(prefix, style=eff_style)
+            if body:
+                txt.append(body)
+            active._live.console.print(txt)
+        else:
+            active._live.console.print(plain, markup=False, highlight=False)
+    elif use_rich() and _Text is not None:
+        txt = _Text()
+        txt.append(prefix, style=eff_style)
+        if body:
+            txt.append(body)
+        _get_console().print(txt)
+    else:
+        out = (
+            stream
+            if stream is not None
+            else (_state.echo_stream if _state.echo_stream is not None else sys.stdout)
+        )
+        print(plain, file=out)
+
+
+def _emit_stderr_tagged(tag: str, message: str) -> None:
+    text = _format_tagged(tag, message)
+    if _use_rich_stderr() and _Text is not None:
+        con = _get_err_console()
+        for line in text.splitlines() or [""]:
+            if not line.strip():
+                con.print("")
+                continue
+            eff_style, prefix, body = _split_tagged(tag, line)
+            txt = _Text()
+            txt.append(prefix, style=eff_style)
+            if body:
+                txt.append(body)
+            con.print(txt)
+    else:
+        print(text, file=sys.stderr)
+
+
+def _strip_legacy_prefix(message: str, prefixes: tuple[str, ...]) -> str:
+    for legacy in prefixes:
+        if message.startswith(legacy):
+            return message[len(legacy) :].lstrip()
+    return message
+
+
+def raw(message: str, *, respect_quiet: bool = False) -> None:
+    """Print raw unprefixed data/tables unless ``--json`` (or optionally ``--quiet``) is active."""
+    if _state.json_mode or (respect_quiet and _state.quiet):
         return
     _emit_stdout(message)
+
+
+def info(message: str, *, source: str | None = None) -> None:
+    """Print an ``[info]`` message unless ``--json`` or ``--quiet`` is active."""
+    if _state.json_mode or _state.quiet:
+        return
+    eff_source = source if source is not None else _state.echo_source
+    if eff_source:
+        echo(message, source=eff_source)
+        return
+    _emit_tagged("info", str(message))
 
 
 def status_line(message: str) -> None:
     """Print a progress/status line unless ``--json`` or ``--quiet`` is active."""
     if _state.json_mode or _state.quiet:
         return
-    _emit_stdout(message)
+    _emit_tagged("info", message)
 
 
 def summary(message: str) -> None:
     """Print final summary text; shown even in ``--quiet``, suppressed in ``--json``."""
     if _state.json_mode:
         return
-    _emit_stdout(message)
+    if "\n" in message:
+        lines = message.splitlines()
+        non_empty = [ln for ln in lines if ln.strip()]
+        if non_empty and all(_LEVEL_PREFIX_RE.match(ln) for ln in non_empty):
+            for ln in lines:
+                if ln.strip():
+                    _emit_tagged("info", ln)
+                else:
+                    _emit_stdout("")
+        else:
+            _emit_stdout(message)
+    elif not message.strip():
+        _emit_stdout(message)
+    else:
+        _emit_tagged("info", message)
 
 
-def warning(message: str) -> None:
-    """Write a warning to ``sys.stderr`` so stdout stays clean for tables and JSON."""
-    has_prefix = message.startswith(("warning:", "solouvm: warning:"))
-    text = message if has_prefix else f"warning: {message}"
-    print(text, file=sys.stderr)
+def warning(message: str, *, source: str | None = None) -> None:
+    """Write a ``[warn]`` warning to ``sys.stderr`` so stdout stays clean."""
+    msg = str(message)
+    eff_source = source if source is not None else _state.echo_source
+    if _LEVEL_PREFIX_RE.match(msg):
+        text = msg
+    else:
+        body = _strip_legacy_prefix(msg, ("solouvm: warning:", "warning:"))
+        if eff_source:
+            lines = body.splitlines() or [""]
+            text = "\n".join(
+                f"[warn] [{eff_source}] {ln}" if ln else f"[warn] [{eff_source}]"
+                for ln in lines
+            )
+        else:
+            text = f"[warn] {body}" if body else "[warn]"
+    _emit_stderr_tagged("warn", text)
 
 
-def error(message: str) -> None:
-    """Write a formatted error message to ``sys.stderr``."""
-    has_prefix = message.startswith(("solouvm: error:", "error:"))
-    text = message if has_prefix else f"solouvm: error: {message}"
-    print(text, file=sys.stderr)
+warn = warning
+
+
+def error(message: str, *, source: str | None = None) -> None:
+    """Write a formatted ``[error]`` message to ``sys.stderr``."""
+    msg = str(message)
+    eff_source = source if source is not None else _state.echo_source
+    if _LEVEL_PREFIX_RE.match(msg):
+        text = msg
+    else:
+        body = _strip_legacy_prefix(msg, ("solouvm: error:", "error:"))
+        if eff_source:
+            lines = body.splitlines() or [""]
+            text = "\n".join(
+                f"[error] [{eff_source}] {ln}" if ln else f"[error] [{eff_source}]"
+                for ln in lines
+            )
+        else:
+            text = f"[error] {body}" if body else "[error]"
+    _emit_stderr_tagged("error", text)
 
 
 def command_log(cmd: str | Sequence[str]) -> None:
@@ -849,7 +1084,7 @@ def command_log(cmd: str | Sequence[str]) -> None:
     if _state.verbose < 2:
         return
     cmd_str = cmd if isinstance(cmd, str) else shlex.join([str(part) for part in cmd])
-    print(f"[cmd] {cmd_str}", file=sys.stderr)
+    _emit_stderr_tagged("cmd", cmd_str)
     if _state.log_file is not None:
         timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
         _state.log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -857,19 +1092,87 @@ def command_log(cmd: str | Sequence[str]) -> None:
             fh.write(f"{timestamp} {cmd_str}\n")
 
 
+def _kv_keys(headers: Sequence[str], ncols: int) -> list[str]:
+    return [
+        str(headers[i]) if i < len(headers) and str(headers[i]) else f"COL{i + 1}"
+        for i in range(ncols)
+    ]
+
+
 def format_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
-    """Format a plain ASCII column-aligned table without any ANSI escape sequences."""
+    """Format rows as vertically stacked ``KEY : VALUE`` records without ANSI escapes."""
     ncols = max([len(headers), *(len(row) for row in rows)], default=0)
     if ncols == 0:
         return ""
     header_cells = [str(headers[i]) if i < len(headers) else "" for i in range(ncols)]
     body_rows = [[str(row[i]) if i < len(row) else "" for i in range(ncols)] for row in rows]
-    all_rows = [header_cells, *body_rows] if headers else body_rows
-    widths = [max(len(row[col]) for row in all_rows) for col in range(ncols)]
-    lines = [
-        "  ".join(row[col].ljust(widths[col]) for col in range(ncols)).rstrip() for row in all_rows
-    ]
-    return "\n".join(lines)
+    if not body_rows:
+        return "  ".join(header_cells).rstrip()
+    if not any(header_cells):
+        return "\n".join("  ".join(row).rstrip() for row in body_rows)
+
+    keys = _kv_keys(header_cells, ncols)
+    key_w = max(len(k) for k in keys)
+    cont_indent = " " * (key_w + 3)
+    records: list[str] = []
+    for row in body_rows:
+        rec_lines: list[str] = []
+        for key, val in zip(keys, row, strict=True):
+            val_lines = val.splitlines() or [""]
+            rec_lines.append(f"{key:<{key_w}} : {val_lines[0]}".rstrip())
+            for extra in val_lines[1:]:
+                rec_lines.append(f"{cont_indent}{extra}".rstrip())
+        records.append("\n".join(rec_lines))
+    return "\n\n".join(records)
+
+
+def _print_rich_kv_table(
+    con: Any,
+    headers: Sequence[str],
+    shown: list[list[str]],
+    *,
+    ncols: int,
+) -> None:
+    header_cells = [str(headers[i]) if i < len(headers) else "" for i in range(ncols)]
+    if not shown:
+        if any(header_cells):
+            con.print(_Text("  ".join(header_cells).rstrip(), style="dim"))
+        return
+    if not any(header_cells):
+        for row in shown:
+            padded = [row[col] if col < len(row) else "" for col in range(ncols)]
+            con.print(_Text("  ".join(padded).rstrip()))
+        return
+
+    keys = _kv_keys(header_cells, ncols)
+    key_w = max(len(k) for k in keys)
+    cont_indent = " " * (key_w + 5)
+    if _Rule is not None:
+        con.print(_Rule(style="dim"))
+    for idx, row in enumerate(shown):
+        if idx > 0:
+            con.print("")
+        padded = [row[col] if col < len(row) else "" for col in range(ncols)]
+        for col_idx, (key, val) in enumerate(zip(keys, padded, strict=True)):
+            val_lines = val.splitlines() or [""]
+            val_style = ""
+            if key.upper() == "STATUS" and val.lower() in _STATUS_ORDER:
+                val_style = _status_style(val.lower())
+            elif col_idx == 0:
+                val_style = "bold"
+            line = _Text("  ")
+            line.append(f"{key:<{key_w}}", style="cyan")
+            line.append(" : ", style="dim")
+            if val_lines[0]:
+                line.append(val_lines[0], style=val_style)
+            con.print(line)
+            for extra in val_lines[1:]:
+                cline = _Text(cont_indent)
+                if extra:
+                    cline.append(extra, style=val_style)
+                con.print(cline)
+    if _Rule is not None:
+        con.print(_Rule(style="dim"))
 
 
 def table(
@@ -878,7 +1181,7 @@ def table(
     *,
     limit: int | None = None,
 ) -> tuple[list[list[str]], int]:
-    """Render a table (Rich on TTY, plain ASCII otherwise) with optional row truncation.
+    """Render a vertical ``KEY : VALUE`` table with optional row truncation.
 
     Returns ``(shown_rows, omitted_count)``.
     """
@@ -899,14 +1202,8 @@ def table(
     if ncols == 0:
         return shown, omitted
 
-    if use_rich() and Table is not None:
-        tbl = Table(show_header=bool(headers))
-        for col in range(ncols):
-            tbl.add_column(str(headers[col]) if col < len(headers) else "")
-        for row in shown:
-            padded = [row[col] if col < len(row) else "" for col in range(ncols)]
-            tbl.add_row(*padded)
-        _get_console().print(tbl, markup=False)
+    if use_rich() and _Text is not None:
+        _print_rich_kv_table(_get_console(), headers, shown, ncols=ncols)
     else:
         rendered = format_table(headers, shown)
         if rendered:
@@ -1026,7 +1323,27 @@ def _build_status_breakdown(by_status: dict[object, object]) -> Any:
     return txt
 
 
-def _build_run_table(payload: dict[str, object]) -> Any:
+def _print_kv_field(
+    con: Any,
+    key: str,
+    value: Any,
+    *,
+    key_w: int = 6,
+    val_style: str = "",
+) -> None:
+    line = _Text("  ")
+    line.append(f"{key:<{key_w}}", style="cyan")
+    line.append(" : ", style="dim")
+    if isinstance(value, _Text):
+        line.append_text(value)
+    else:
+        sval = str(value)
+        if sval:
+            line.append(sval, style=val_style)
+    con.print(line)
+
+
+def _print_run_summary_vertical(con: Any, payload: dict[str, object]) -> None:
     run_id = str(payload.get("run_id", ""))
     partial = bool(payload.get("partial", False))
     summary_raw = payload.get("summary")
@@ -1060,8 +1377,6 @@ def _build_run_table(payload: dict[str, object]) -> Any:
         for c in _CATEGORY_ORDER
         if int(by_category.get(c, 0) or 0) > 0
     ]
-    has_cat = bool(cat_parts) or any(bool(j.get("category")) for j in shown)
-    has_fail = any(str(j.get("status", "")) not in _PASS_STATUSES for j in shown)
 
     if partial:
         pass_style = "bold yellow"
@@ -1077,63 +1392,49 @@ def _build_run_table(payload: dict[str, object]) -> Any:
     if partial:
         title.append(" [PARTIAL]", style="bold yellow")
 
-    caption = (
-        _Text(f"... omitted {omitted} job(s) (pass --limit 0 to show all)", style="dim")
-        if omitted
-        else None
-    )
-    tbl = Table(
-        title=title,
-        title_justify="left",
-        title_style="none",
-        caption=caption,
-        caption_justify="left",
-        caption_style="dim",
-        show_header=True,
-        show_footer=True,
-        footer_style="none",
-    )
-    tbl.add_column("JOB", footer=_Text(f"Total ({passed}/{total})", style=pass_style))
-    tbl.add_column("STATUS", footer=_Text(rate_str, style=pass_style))
-    tbl.add_column("TIME", justify="right", footer=_Text(f"{duration_s:.3f}s", style="bold"))
-    if has_cat:
-        cat_footer = (
-            _Text("  ".join(cat_parts), style="dim") if cat_parts else _Text("-", style="dim")
-        )
-        tbl.add_column("CAT", footer=cat_footer)
-    tbl.add_column("DETAIL", footer=_build_status_breakdown(by_status))
-    if has_fail:
-        tbl.add_column("LOG", footer="")
+    con.print(title)
+    if _Rule is not None:
+        con.print(_Rule(style="dim"))
 
     if not shown:
-        empty_row: list[Any] = [
-            _Text("(no jobs)", style="dim"),
-            _Text("-", style="dim"),
-            _Text("-", style="dim"),
-        ]
-        if has_cat:
-            empty_row.append(_Text("-", style="dim"))
-        empty_row.append(_Text("-", style="dim"))
-        if has_fail:
-            empty_row.append(_Text("-", style="dim"))
-        tbl.add_row(*empty_row)
+        con.print(_Text("  (no jobs)", style="dim"))
     else:
-        for job in shown:
+        for idx, job in enumerate(shown):
+            if idx > 0:
+                con.print("")
             status = str(job.get("status", ""))
-            row: list[Any] = [
-                _Text(str(job.get("job_id", ""))),
-                _Text(status, style=_status_style(status)),
-                f"{_job_duration(job):.3f}s",
-            ]
-            if has_cat:
-                row.append(str(job.get("category") or "-"))
-            row.append(_format_job_detail(job, status))
-            if has_fail:
-                log_cell = "-" if status in _PASS_STATUSES else _job_last_log(job)
-                row.append(_Text(log_cell, style="dim"))
-            tbl.add_row(*row)
+            _print_kv_field(con, "JOB", str(job.get("job_id", "")), val_style="bold")
+            _print_kv_field(con, "STATUS", status, val_style=_status_style(status))
+            _print_kv_field(con, "TIME", f"{_job_duration(job):.3f}s")
+            cat = job.get("category")
+            if cat:
+                _print_kv_field(con, "CAT", str(cat))
+            _print_kv_field(con, "DETAIL", _format_job_detail(job, status))
+            if status not in _PASS_STATUSES:
+                _print_kv_field(con, "LOG", _job_last_log(job), val_style="dim")
 
-    return tbl
+    if omitted:
+        con.print(
+            _Text(
+                f"  ... omitted {omitted} job(s) (pass --limit 0 to show all)",
+                style="dim",
+            )
+        )
+    if _Rule is not None:
+        con.print(_Rule(style="dim"))
+
+    total_line = _Text("  ")
+    total_line.append(f"Total ({passed}/{total})", style=pass_style)
+    total_line.append(" : ", style="dim")
+    total_line.append(rate_str, style=pass_style)
+    total_line.append("  |  ", style="dim")
+    total_line.append(f"{duration_s:.3f}s", style="bold")
+    if cat_parts:
+        total_line.append("  |  ", style="dim")
+        total_line.append("  ".join(cat_parts), style="dim")
+    total_line.append("  |  ", style="dim")
+    total_line.append_text(_build_status_breakdown(by_status))
+    con.print(total_line)
 
 
 def _print_signatures(con: Any, signatures: list[dict[str, object]]) -> None:
@@ -1179,7 +1480,7 @@ def _print_waivers_and_hints(con: Any, payload: dict[str, object]) -> None:
     if isinstance(hints, list) and hints:
         for hint in hints:
             htxt = _Text()
-            htxt.append("hint: ", style="bold cyan")
+            htxt.append("[info] hint: ", style="bold cyan")
             htxt.append(str(hint))
             con.print(htxt)
 
@@ -1220,16 +1521,16 @@ def print_run_summary(
     compare: dict[str, object] | None = None,
     fallback_text: str = "",
 ) -> None:
-    """Render regression results as a single Rich table on TTY or fallback plain text."""
+    """Render regression results vertically as Rich ``KEY : VALUE`` records on TTY."""
     if _state.json_mode:
         return
-    if not (use_rich() and Table is not None and _Text is not None):
+    if not (use_rich() and _Text is not None):
         if fallback_text:
-            summary(fallback_text)
+            raw(fallback_text)
         return
 
     con = _get_console()
-    con.print(_build_run_table(payload), markup=False)
+    _print_run_summary_vertical(con, payload)
 
     sigs = [s for s in (payload.get("signatures") or []) if isinstance(s, dict)]
     if sigs:

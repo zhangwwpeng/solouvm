@@ -107,11 +107,12 @@ def test_full_five_stage_and_hook_order_with_b_hooks(
     ]
 
     out = capsys.readouterr().out
-    for idx, st in enumerate(("Generate", "Sync", "Compile", "Simulate", "Judge"), 1):
-        assert f"==> [{idx}/5] {st}" in out
-        assert f"[ok]   [{idx}/5] {st}" in out
+    for st in ("Generate", "Sync", "Compile", "Simulate", "Judge"):
+        assert f"[info]  {st}" in out
+    assert "[1/5]" not in out
+    assert "[ok]" not in out
     assert "[hook] pre:gen (hooks/pre_hook_gen.py)" in out
-    assert "[pre_gen] hooked pre gen" in out
+    assert "[hook] [pre:gen] hooked pre gen" in out
     assert "[hook] post:judge ok" in out
 
     # B-side job.pre / job.post executed inside sim.log
@@ -144,8 +145,8 @@ def test_no_hooks_skips_all_a_side_hooks_and_resets(
     assert not marker.exists()
     out = capsys.readouterr().out
     assert "[hook]" not in out
-    assert "==> [1/5] Generate" in out
-    assert "==> [5/5] Judge" in out
+    assert "[info]  Generate" in out
+    assert "[info]  Judge" in out
 
     # Next invocation without --no-hooks re-enables hooks cleanly
     rc2 = main(["-c", str(proj), "gen"])
@@ -263,7 +264,7 @@ def test_hook_output_safety_in_json_and_quiet_modes(
     q_out = capsys.readouterr().out
     assert "RAW_PRINT" not in q_out
     assert "CTX_LOG" not in q_out
-    assert "==>" not in q_out
+    assert "Generate" not in q_out
     assert "[hook]" not in q_out
 
 
@@ -274,33 +275,49 @@ def test_hook_echo_persists_while_print_and_log_stay_stage_scoped(
     _write(
         proj / "hooks" / "pre_hook_gen.py",
         """\
-        from solouvm import echo
+        from solouvm import echo, error, info, warn
 
         def hook(ctx):
             print("RAW_STAGE_PRINT")
             ctx.log("CTX_STAGE_LOG")
             ctx.echo("PERSIST_FROM_CTX_ECHO [ok]")
             echo("PERSIST_FROM_TOP_ECHO")
+            ctx.info("INFO_FROM_CTX")
+            info("INFO_FROM_TOP")
+            ctx.warn("WARN_FROM_CTX")
+            warn("WARN_FROM_TOP")
+            ctx.error("ERR_FROM_CTX")
+            error("ERR_FROM_TOP")
         """,
     )
 
-    # 1. Human mode: both echo forms tag source script path; print/log keep hook phase prefix
+    # 1. Human mode: both echo & unified logging tag source script path without buf capture
     assert main(["-c", str(proj), "gen"]) == 0
-    out = capsys.readouterr().out
-    assert "  [hooks/pre_hook_gen.py] PERSIST_FROM_CTX_ECHO [ok]\n" in out
-    assert "  [hooks/pre_hook_gen.py] PERSIST_FROM_TOP_ECHO\n" in out
-    assert "[pre_gen] PERSIST_FROM" not in out
-    assert "    [pre_gen] RAW_STAGE_PRINT" in out
-    assert "    [pre_gen] CTX_STAGE_LOG" in out
+    captured = capsys.readouterr()
+    out, err = captured.out, captured.err
+    assert "[info] [hooks/pre_hook_gen.py] PERSIST_FROM_CTX_ECHO [ok]\n" in out
+    assert "[info] [hooks/pre_hook_gen.py] PERSIST_FROM_TOP_ECHO\n" in out
+    assert "[info] [hooks/pre_hook_gen.py] INFO_FROM_CTX\n" in out
+    assert "[info] [hooks/pre_hook_gen.py] INFO_FROM_TOP\n" in out
+    assert "[warn] [hooks/pre_hook_gen.py] WARN_FROM_CTX\n" in err
+    assert "[warn] [hooks/pre_hook_gen.py] WARN_FROM_TOP\n" in err
+    assert "[error] [hooks/pre_hook_gen.py] ERR_FROM_CTX\n" in err
+    assert "[error] [hooks/pre_hook_gen.py] ERR_FROM_TOP\n" in err
+    assert "[pre:gen] PERSIST_FROM" not in out
+    assert "[pre:gen] INFO_FROM" not in out
+    assert "[hook] [pre:gen] RAW_STAGE_PRINT" in out
+    assert "[hook] [pre:gen] CTX_STAGE_LOG" in out
 
-    # 2. JSON single-envelope and streaming modes silence echo cleanly
+    # 2. JSON single-envelope and streaming modes silence echo & info cleanly
     assert main(["--json", "-c", str(proj), "gen"]) == 0
-    gen_payload = json.loads(capsys.readouterr().out)
+    json_cap = capsys.readouterr()
+    gen_payload = json.loads(json_cap.out)
     assert gen_payload["ok"] is True
 
     assert main(["--json", "-c", str(proj), "regress", "--rebuild"]) == 0
     reg_out = capsys.readouterr().out
     assert "PERSIST_FROM_" not in reg_out
+    assert "INFO_FROM_" not in reg_out
     assert "RAW_STAGE_PRINT" not in reg_out
     assert "CTX_STAGE_LOG" not in reg_out
 

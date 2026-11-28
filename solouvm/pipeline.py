@@ -662,7 +662,8 @@ class _BuildMonitor:
                     build_key=key,
                 )
             else:
-                live.log(f"[build/{mode}] cached ({key})")
+                _ = live
+                ui.stage_info("build", f"[build/{mode}] cached ({key})")
 
     def _read_build_facts(self, facts_rel: str) -> Facts | None:
         if self._is_local:
@@ -725,7 +726,7 @@ class _BuildMonitor:
                         build_key=key,
                     )
                 elif not self._stream_logs:
-                    live.log(f"[{self._plan.run_id}] build/{mode} building ({key})...")
+                    ui.stage_info("build", f"[build/{mode}] building ({key})...")
 
             is_finished = facts.state != "running"
             log_rel = f"{rel_dir}/build.log"
@@ -751,9 +752,19 @@ class _BuildMonitor:
                         duration_s=facts.duration_s,
                     )
                 else:
-                    dur = f"{facts.duration_s:.1f}s" if facts.duration_s is not None else "?"
-                    status = "ok" if facts.rc == 0 else f"failed (rc={facts.rc})"
-                    live.log(f"[build/{mode}] {status} ({dur})")
+                    if facts.rc == 0:
+                        ui.stage_info(
+                            "build",
+                            f"[build/{mode}] finished",
+                            duration_s=facts.duration_s,
+                        )
+                    else:
+                        ui.stage_info(
+                            "build",
+                            f"[build/{mode}] failed (rc={facts.rc})",
+                            ok=False,
+                            duration_s=facts.duration_s,
+                        )
 
     def footer_text(self) -> str:
         active = [
@@ -1468,7 +1479,13 @@ def _launch_make(
                     rc=info["rc"],
                 )
             elif not ui.is_tty() and not ui.is_quiet():
-                ui.info(f"[{plan.run_id}] {jid} try{info['try']} finished (rc={info['rc']})")
+                dur_val = info.get("duration_s")
+                ui.stage_info(
+                    "run",
+                    f"{jid} try{info['try']} finished (rc={info['rc']})",
+                    ok=bool(info["rc"] == 0),
+                    duration_s=dur_val if isinstance(dur_val, (int, float)) else None,
+                )
 
     def _format_sim_footer(
         facts_map: dict[str, dict[str, object]],
@@ -2830,7 +2847,7 @@ def read_job_log(
             if ui.is_json_mode():
                 output.emit_event("log_line", job_id=target_label, line=lineno, text=text)
             else:
-                ui.info(text)
+                ui.raw(text, respect_quiet=True)
         while facts_rel and provider.transport.exists(facts_rel):
             facts_txt = _read_remote_or_local(provider, facts_rel)
             try:
